@@ -1,0 +1,14 @@
+{
+  "background_color": "#ffffff",
+  "description": "App Brazilzão",
+  "dir": "ltr",
+  "display": "standalone",
+  "name": "BRAZILZÃO",
+  "orientation": "any",
+  "scope": "/",
+  "short_name": "Brazilzao",
+  "start_url": "/",
+  "theme_color": "#ffffff",
+  "id": "/",
+  "lang": "pt"
+}

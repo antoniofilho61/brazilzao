@@ -1,0 +1,16 @@
+{
+  "appId": "com.brazilzao.app",
+  "appName": "Brazilzão",
+  "webDir": "out",
+  "server": {
+    "androidScheme": "https",
+    "cleartext": true
+  },
+  "plugins": {
+    "StatusBar": {
+      "overlaysWebView": true,
+      "style": "DARK",
+      "backgroundColor": "#008C3A"
+    }
+  }
+}

@@ -1,0 +1,149 @@
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0a0a0a;
+    --foreground: #ededed;
+  }
+}
+
+html {
+  height: 100%;
+}
+
+html,
+body {
+  max-width: 100vw;
+  overflow-x: hidden;
+}
+
+body {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  color: var(--foreground);
+  background: var(--background);
+  font-family: Arial, Helvetica, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+  padding: 0;
+  margin: 0;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+@media (prefers-color-scheme: dark) {
+  html {
+    color-scheme: dark;
+  }
+}
+
+.likeAnimando span:first-child {
+  animation: pulsoLike 350ms ease;
+}
+
+
+@keyframes pulsoLike {
+
+  0% {
+    transform:scale(1);
+  }
+
+  40% {
+    transform:scale(1.4);
+  }
+
+  70% {
+    transform:scale(1.15);
+  }
+
+  100% {
+    transform:scale(1);
+  }
+
+}
+
+.commentAnimando span:first-child {
+  animation: efeitoComentario 400ms ease;
+}
+
+
+@keyframes efeitoComentario {
+
+  0% {
+    transform:scale(1);
+  }
+
+  40% {
+    transform:scale(1.3);
+  }
+
+  70% {
+    transform:scale(1.1);
+  }
+
+  100% {
+    transform:scale(1);
+  }
+
+}
+
+.shareAnimando span:first-child {
+  animation: efeitoCompartilhar 400ms ease;
+}
+
+
+@keyframes efeitoCompartilhar {
+
+  0% {
+    transform:scale(1);
+  }
+
+  40% {
+    transform:scale(1.35) rotate(-10deg);
+  }
+
+  70% {
+    transform:scale(1.1) rotate(5deg);
+  }
+
+  100% {
+    transform:scale(1) rotate(0);
+  }
+
+}
+
+.likeAnimando span:first-child {
+  animation: efeitoCurtir 400ms ease;
+}
+
+
+@keyframes efeitoCurtir {
+
+  0% {
+    transform: scale(1);
+  }
+
+  40% {
+    transform: scale(1.4);
+  }
+
+  70% {
+    transform: scale(1.15);
+  }
+
+  100% {
+    transform: scale(1);
+  }
+
+}
