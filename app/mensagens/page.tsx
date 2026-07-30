@@ -749,7 +749,7 @@ export default function Mensagens() {
         lida: false
       })
 
-      // 3. Disparo de Push para o Firebase
+      // 3. Disparo de Push para o Firebase (URL Inteligente)
       const { data: perfilDestino } = await supabase
         .from('profiles')
         .select('fcm_token')
@@ -757,7 +757,11 @@ export default function Mensagens() {
         .maybeSingle()
 
       if (perfilDestino?.fcm_token) {
-        const URL_SERVIDOR = 'https://papo-br-brazilzao.vercel.app'
+        // Se for aplicativo no celular (APK) usa o domínio Vercel. No navegador usa caminho relativo.
+        const URL_SERVIDOR = Capacitor.isNativePlatform()
+          ? 'https://papo-br-brazilzao.vercel.app'
+          : ''
+
         fetch(`${URL_SERVIDOR}/api/notificacao-chamada`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
