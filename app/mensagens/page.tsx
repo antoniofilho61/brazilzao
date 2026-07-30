@@ -1283,6 +1283,25 @@ async function reagirMensagem(mensagemId: string, emoji: string) {
           z-index: 0;
         }
 
+/* ANIMAÇÃO DE PULSO NO BOTÃO DE ATENDER */
+        @keyframes balancarAtender {
+          0% { transform: scale(1) rotate(0deg); box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.7); }
+          15% { transform: scale(1.1) rotate(12deg); }
+          30% { transform: scale(1.1) rotate(-12deg); }
+          45% { transform: scale(1.1) rotate(8deg); }
+          60% { transform: scale(1.1) rotate(-8deg); }
+          75% { transform: scale(1.05); box-shadow: 0 0 0 20px rgba(34, 197, 94, 0); }
+          100% { transform: scale(1) rotate(0deg); box-shadow: 0 0 0 0 rgba(34, 197, 94, 0); }
+        }
+        .btn-atender-animado {
+          animation: balancarAtender 1.5s infinite ease-in-out;
+        }
+
+        /* BRILHO NEON DA FOTO EM CHAMADA */
+        .avatar-chamada-ring {
+          box-shadow: 0 0 0 4px #111b21, 0 0 35px rgba(0, 168, 132, 0.6);
+        }
+
       `}</style>
 
       {/* HEADER SUPERIOR */}
@@ -1630,37 +1649,61 @@ async function reagirMensagem(mensagemId: string, emoji: string) {
         </div>
       )}
 
-      {/* OVERLAY RECEBENDO CHAMADA */}
+      {/* OVERLAY RECEBENDO CHAMADA (TELA NATIVA) */}
       {chamadaRecebida && (
         <div style={modalChamadaOverlay}>
-          <div style={{ textAlign: 'center', color: '#fff', zIndex: 2, marginTop: 40 }}>
-            <span style={{ fontSize: 13, color: '#00a884', fontWeight: 'bold', textTransform: 'uppercase' }}>
-              Recebendo Chamada de {chamadaRecebida.tipo === 'video' ? 'Vídeo' : 'Áudio'}
+          {/* TOPO: NOME E STATUS */}
+          <div style={{ textAlign: 'center', color: '#fff', zIndex: 2, marginTop: 20 }}>
+            <h2 style={{ fontSize: 26, margin: '0 0 6px 0', fontWeight: 'bold', textShadow: '0 2px 8px rgba(0,0,0,0.8)' }}>
+              @{chamadaRecebida.remetente.username || chamadaRecebida.remetente.nome}
+            </h2>
+            <span style={{ fontSize: 13, color: '#00a884', fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: 1 }}>
+              Chamada de {chamadaRecebida.tipo === 'video' ? 'Vídeo' : 'Voz'} Recebida...
             </span>
-            <div style={avatarChamadaBox} className="iconeBalancando">
+          </div>
+
+          {/* CENTRO: FOTO REDONDA GRANDE COM ANEL ANIMADO */}
+          <div style={{ zIndex: 2 }}>
+            <div style={{ width: 140, height: 140, borderRadius: '50%', background: '#008C3A', margin: '0 auto', overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center' }} className="avatar-chamada-ring iconeBalancando">
               {chamadaRecebida.remetente.foto_url ? (
                 <img src={chamadaRecebida.remetente.foto_url} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
               ) : (
-                <span style={{ fontSize: 40, color: '#fff' }}>
+                <span style={{ fontSize: 50, color: '#fff', fontWeight: 'bold' }}>
                   {chamadaRecebida.remetente.nome?.charAt(0).toUpperCase() || 'U'}
                 </span>
               )}
             </div>
-            <h2 style={{ fontSize: 24, margin: '10px 0 4px 0', fontWeight: 'bold' }}>
-              @{chamadaRecebida.remetente.username || chamadaRecebida.remetente.nome}
-            </h2>
-            <p style={{ fontSize: 14, color: '#FFD700', margin: 0, fontWeight: 'bold' }}>
-              ID Autorizado chamando você
-            </p>
           </div>
-          <div style={{ display: 'flex', gap: 30, zIndex: 2 }}>
-            <button onClick={recusarChamada} style={{ width: 64, height: 64, borderRadius: '50%', backgroundColor: '#ef4444', border: 'none', color: '#fff', fontSize: 24, cursor: 'pointer' }}>📞</button>
-            <button onClick={aceitarChamada} style={{ width: 64, height: 64, borderRadius: '50%', backgroundColor: '#22c55e', border: 'none', color: '#fff', fontSize: 24, cursor: 'pointer' }}>📞</button>
+
+          {/* RODAPÉ: BOTÕES DE RECUSAR E ATENDER */}
+          <div style={{ display: 'flex', gap: 50, zIndex: 2, marginBottom: 20, alignItems: 'center' }}>
+            {/* BOTÃO VERMELHO (RECUSAR) */}
+            <button 
+              onClick={recusarChamada} 
+              style={{ width: 70, height: 70, borderRadius: '50%', backgroundColor: '#ef4444', border: 'none', color: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 6px 20px rgba(239, 68, 68, 0.4)' }}
+              title="Recusar Chamada"
+            >
+              <svg width="28" height="28" viewBox="0 0 24 24" fill="#fff" stroke="#fff" strokeWidth="1">
+                <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z" transform="rotate(135 12 12)" />
+              </svg>
+            </button>
+
+            {/* BOTÃO VERDE (ATENDER) */}
+            <button 
+              onClick={aceitarChamada} 
+              className="btn-atender-animado"
+              style={{ width: 70, height: 70, borderRadius: '50%', backgroundColor: '#22c55e', border: 'none', color: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+              title="Atender Chamada"
+            >
+              <svg width="28" height="28" viewBox="0 0 24 24" fill="#fff" stroke="#fff" strokeWidth="1">
+                <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z" />
+              </svg>
+            </button>
           </div>
         </div>
       )}
 
-      {/* OVERLAY EM CHAMADA */}
+      {/* OVERLAY EM CHAMADA (QUANDO LIGA OU CONECTA) */}
       {emChamada && (
         <div style={modalChamadaOverlay}>
           {emChamada.tipo === 'video' && (
@@ -1704,42 +1747,45 @@ async function reagirMensagem(mensagemId: string, emoji: string) {
             </>
           )}
 
-          <div style={{ textAlign: 'center', color: '#fff', zIndex: 2, marginTop: 30 }}>
-            <span style={{ fontSize: 13, color: '#00a884', fontWeight: 'bold', textTransform: 'uppercase', textShadow: '0 2px 4px rgba(0,0,0,0.8)' }}>
-              {emChamada.tipo === 'video' ? 'Chamada de Vídeo' : 'Chamada de Áudio'}
-            </span>
-            {(emChamada.tipo === 'audio' || emChamada.status === 'chamando') && (
-              <>
-                <div style={avatarChamadaBox} className={emChamada.status === 'chamando' ? 'iconeBalancando' : ''}>
-                  {conversaAberta?.outroUsuario?.foto_url ? (
-                    <img src={conversaAberta.outroUsuario.foto_url} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-                  ) : (
-                    <span style={{ fontSize: 40, color: '#fff' }}>
-                      {conversaAberta?.outroUsuario?.nome?.charAt(0).toUpperCase() || 'U'}
-                    </span>
-                  )}
-                </div>
-                <h2 style={{ fontSize: 22, margin: '10px 0 4px 0', fontWeight: 'bold', textShadow: '0 2px 8px rgba(0,0,0,0.8)' }}>
-                  @{conversaAberta?.outroUsuario?.username || conversaAberta?.outroUsuario?.nome}
-                </h2>
-              </>
-            )}
-            <p style={{ fontSize: 14, color: emChamada.status === 'chamando' ? '#FFD700' : '#8696a0', margin: 0, fontWeight: emChamada.status === 'chamando' ? 'bold' : 'normal', textShadow: '0 2px 8px rgba(0,0,0,0.8)' }}>
-              {emChamada.status === 'chamando' ? 'Chamando via ID Privado...' : formatarTempo(tempoChamada)}
+          {/* TOPO: NOME E TEMPO / STATUS */}
+          <div style={{ textAlign: 'center', color: '#fff', zIndex: 2, marginTop: 20 }}>
+            <h2 style={{ fontSize: 26, margin: '0 0 6px 0', fontWeight: 'bold', textShadow: '0 2px 8px rgba(0,0,0,0.8)' }}>
+              @{conversaAberta?.outroUsuario?.username || conversaAberta?.outroUsuario?.nome}
+            </h2>
+            <p style={{ fontSize: 14, color: emChamada.status === 'chamando' ? '#FFD700' : '#8696a0', margin: 0, fontWeight: 'bold', textShadow: '0 2px 8px rgba(0,0,0,0.8)' }}>
+              {emChamada.status === 'chamando' ? 'Chamando...' : formatarTempo(tempoChamada)}
             </p>
           </div>
 
-          <div style={controlesChamadaBar}>
-            <button onClick={alternarMicrofone} style={{ width: 52, height: 52, borderRadius: '50%', backgroundColor: emChamada.microfoneMutado ? '#ef4444' : '#2a3942', border: '1.5px solid #374151', cursor: 'pointer' }}>
+          {/* CENTRO: FOTO REDONDA GRANDE (Para áudio ou enquanto chama) */}
+          {(emChamada.tipo === 'audio' || emChamada.status === 'chamando') && (
+            <div style={{ zIndex: 2 }}>
+              <div style={{ width: 140, height: 140, borderRadius: '50%', background: '#008C3A', margin: '0 auto', overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center' }} className={emChamada.status === 'chamando' ? 'iconeBalancando avatar-chamada-ring' : 'avatar-chamada-ring'}>
+                {conversaAberta?.outroUsuario?.foto_url ? (
+                  <img src={conversaAberta.outroUsuario.foto_url} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                ) : (
+                  <span style={{ fontSize: 50, color: '#fff', fontWeight: 'bold' }}>
+                    {conversaAberta?.outroUsuario?.nome?.charAt(0).toUpperCase() || 'U'}
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* CONTROLES INFERIORES */}
+          <div style={{...controlesChamadaBar, marginBottom: 20}}>
+            <button onClick={alternarMicrofone} style={{ width: 56, height: 56, borderRadius: '50%', backgroundColor: emChamada.microfoneMutado ? '#ef4444' : '#2a3942', border: '1.5px solid #374151', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
               <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" /><path d="M19 10v2a7 7 0 0 1-14 0v-2" /><line x1="12" y1="19" x2="12" y2="23" /></svg>
             </button>
+            
             {emChamada.tipo === 'video' && (
-              <button onClick={inverterCamera} style={{ width: 52, height: 52, borderRadius: '50%', backgroundColor: '#2a3942', border: '1.5px solid #374151', cursor: 'pointer' }}>
+              <button onClick={inverterCamera} style={{ width: 56, height: 56, borderRadius: '50%', backgroundColor: '#2a3942', border: '1.5px solid #374151', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
                 <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2"><path d="M20 10c0-4.4-3.6-8-8-8s-8 3.6-8 8h3l-4 4-4-4h3c0-5.5 4.5-10 10-10s10 4.5 10 10h-2z" /><path d="M4 14c0 4.4 3.6 8 8 8s8-3.6 8-8h-3l4-4 4 4h-3c0 5.5-4.5 10-10 10s-10-4.5-10-10h2z" /></svg>
               </button>
             )}
-            <button onClick={encerrarChamada} style={{ width: 62, height: 62, borderRadius: '50%', backgroundColor: '#ff4d4d', border: '2.5px solid #000', cursor: 'pointer' }}>
-              <svg width="24" height="22" viewBox="0 0 24 24" fill="#000" stroke="#000" strokeWidth="1"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z" transform="rotate(135 12 12)" /></svg>
+            
+            <button onClick={encerrarChamada} style={{ width: 64, height: 64, borderRadius: '50%', backgroundColor: '#ff4d4d', border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 6px 20px rgba(255, 77, 77, 0.4)' }}>
+              <svg width="26" height="26" viewBox="0 0 24 24" fill="#fff" stroke="#fff" strokeWidth="1"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z" transform="rotate(135 12 12)" /></svg>
             </button>
           </div>
         </div>
