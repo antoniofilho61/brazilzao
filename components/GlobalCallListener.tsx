@@ -12,6 +12,7 @@ export default function GlobalCallListener() {
 
   useEffect(() => {
     let canal: any = null
+    let appListener: any = null
 
     async function escutarChamadasGlobais() {
       const { data: sessao } = await supabase.auth.getSession()
@@ -28,10 +29,36 @@ export default function GlobalCallListener() {
         .subscribe()
     }
 
+    async function configurarDeepLink() {
+      // Importa dinamicamente para não travar o servidor do Next.js
+      if (typeof window !== 'undefined') {
+        const { App } = await import('@capacitor/app')
+        appListener = await App.addListener('appUrlOpen', (event) => {
+          if (event.url.includes('brazilzao://chamada')) {
+            const url = new URL(event.url)
+            const conversaIdUrl = url.searchParams.get('conversaId')
+            const nomeUrl = url.searchParams.get('nome')
+            const tipoUrl = url.searchParams.get('tipo')
+
+            if (conversaIdUrl) {
+              setChamadaRecebida({
+                remetente: { id: conversaIdUrl, nome: nomeUrl },
+                tipo: tipoUrl,
+                conversaId: conversaIdUrl
+              })
+              tocarSomEVibracao()
+            }
+          }
+        })
+      }
+    }
+
     escutarChamadasGlobais()
+    configurarDeepLink()
 
     return () => {
       if (canal) supabase.removeChannel(canal)
+      if (appListener) appListener.remove() // Limpa o evento ao sair
       pararSomEVibracao()
     }
   }, [])
@@ -52,12 +79,10 @@ export default function GlobalCallListener() {
     pararSomEVibracao()
     iniciarAudioContext()
 
-    // 1. Vibração contínua
     if (typeof navigator !== 'undefined' && navigator.vibrate) {
       navigator.vibrate([1000, 800, 1000, 800, 1000, 800, 1000, 800])
     }
 
-    // 2. Som de toque telefônico em tom duplo (440Hz + 480Hz)
     const ctx = audioCtxRef.current
     const tocarCampainha = () => {
       if (!ctx || ctx.state === 'closed') return

@@ -54,6 +54,14 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
 
+            <!-- 🚨 ADICIONE ESTE BLOCO AQUI PARA ACEITAR O DEEP LINK DA CHAMADA -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="brazilzao" android:host="chamada" />
+            </intent-filter>
+
         </activity>
 
         <!-- SERVIÇO NATIVO QUE ACENDE A TELA E TOCA A CAMPAINHA EM SEGUNDO PLANO -->

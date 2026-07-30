@@ -126,6 +126,10 @@ export default function Mensagens() {
   const [telaConversaAberta, setTelaConversaAberta] = useState(false)
   const areaMensagensRef = useRef<HTMLDivElement | null>(null)
   const [novaMensagem, setNovaMensagem] = useState('')
+  const [menuAnexosAberto, setMenuAnexosAberto] = useState(false)
+  const [mensagemOpcoesId, setMensagemOpcoesId] = useState<string | null>(null)
+  const [mensagemEditando, setMensagemEditando] = useState<Mensagem | null>(null) 
+  const [mensagemReacaoId, setMensagemReacaoId] = useState<string | null>(null)
 
   // MODAL ADICIONAR POR ID
   const [modalAdicionarIDAberto, setModalAdicionarIDAberto] = useState(false)
@@ -689,22 +693,87 @@ export default function Mensagens() {
     }
   }
 
+async function reagirMensagem(mensagemId: string, emoji: string) {
+    setMensagemReacaoId(null) // Fecha o menu flutuante
+
+    const msg = mensagens.find(m => m.id === mensagemId)
+    if (!msg || !usuarioAtual) return
+
+    const novasReacoes = { ...(msg.reacoes || {}) }
+
+    // Se clicar no mesmo emoji, ele remove (efeito toggle)
+    if (novasReacoes[usuarioAtual.id] === emoji) {
+      delete novasReacoes[usuarioAtual.id]
+    } else {
+      novasReacoes[usuarioAtual.id] = emoji
+    }
+
+    // Atualiza a tela instantaneamente antes mesmo do banco responder
+    setMensagens(prev => prev.map(m => m.id === mensagemId ? { ...m, reacoes: novasReacoes } : m))
+
+    // Salva no Supabase
+    await supabase.from('mensagens').update({ reacoes: novasReacoes }).eq('id', mensagemId)
+  }
+
+  async function apagarMensagem(id: string) {
+    setMensagemOpcoesId(null) // Fecha o menu 3D
+    const confirmacao = window.confirm('Tem certeza que deseja apagar esta mensagem?')
+    if (!confirmacao) return
+
+    // Deleta do Banco de Dados Supabase
+    const { error } = await supabase.from('mensagens').delete().eq('id', id)
+    
+    if (!error) {
+      // Remove da tela instantaneamente
+      setMensagens((prev) => prev.filter((msg) => msg.id !== id))
+    } else {
+      alert('Erro ao apagar a mensagem.')
+    }
+  }
+
+  function iniciarEdicao(mensagem: Mensagem) {
+    setMensagemOpcoesId(null) // Fecha o menu 3D
+    setMensagemEditando(mensagem) // Ativa o modo edição
+    setNovaMensagem(mensagem.texto) // Joga o texto na caixa de envio
+  }
+
   async function enviarMensagem() {
     if (!usuarioAtual || !conversaAberta) return
     const texto = novaMensagem.trim()
     if (!texto) return
-    const destinatarioId = conversaAberta.usuario_1 === usuarioAtual.id ? conversaAberta.usuario_2 : conversaAberta.usuario_1
+
     setEnviando(true)
-    const { error } = await supabase.from('mensagens').insert({
-      conversa_id: conversaAberta.id,
-      remetente_id: usuarioAtual.id,
-      destinatario_id: destinatarioId,
-      texto,
-      lida: false
-    })
-    if (!error) {
-      setNovaMensagem('')
-      await carregarMensagens(conversaAberta.id)
+
+    if (mensagemEditando) {
+      // --- MODO EDIÇÃO ---
+      const { error } = await supabase
+        .from('mensagens')
+        .update({ texto: texto })
+        .eq('id', mensagemEditando.id)
+
+      if (!error) {
+        setNovaMensagem('')
+        setMensagemEditando(null)
+        await carregarMensagens(conversaAberta.id) // Recarrega a conversa
+      } else {
+        alert('Erro ao editar a mensagem.')
+      }
+    } else {
+      // --- MODO NOVO ENVIO ---
+      const destinatarioId = conversaAberta.usuario_1 === usuarioAtual.id ? conversaAberta.usuario_2 : conversaAberta.usuario_1
+      
+      const { error } = await supabase.from('mensagens').insert({
+        conversa_id: conversaAberta.id,
+        remetente_id: usuarioAtual.id,
+        destinatario_id: destinatarioId,
+        texto,
+        lida: false
+      })
+
+      if (!error) {
+        setNovaMensagem('')
+        await carregarMensagens(conversaAberta.id)
+      }
     }
     setEnviando(false)
   }
@@ -942,6 +1011,215 @@ export default function Mensagens() {
         .iconeBalancando {
           animation: balancarChama 0.75s infinite ease-in-out;
         }
+
+        /* NOVOS ESTILOS: MENU FUTURISTA */
+        .menu-anexos-container {
+          position: relative;
+          display: flex;
+          align-items: center;
+        }
+        .btn-mais-flutuante {
+          background: #202c33;
+          border: none;
+          border-radius: 50%;
+          width: 42px;
+          height: 42px;
+          color: #8696a0;
+          font-size: 26px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          cursor: pointer;
+          transition: all 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+          z-index: 10;
+          flex-shrink: 0;
+          margin-right: 8px;
+        }
+        .btn-mais-flutuante.aberto {
+          transform: rotate(45deg);
+          background: #ff4d4d;
+          color: #fff;
+          box-shadow: 0 4px 15px rgba(255, 77, 77, 0.4);
+        }
+        .menu-opcoes-glass {
+          position: absolute;
+          bottom: 55px;
+          left: 0;
+          display: flex;
+          flex-direction: column;
+          gap: 12px;
+          padding: 14px;
+          background: rgba(32, 44, 51, 0.65);
+          backdrop-filter: blur(12px);
+          -webkit-backdrop-filter: blur(12px);
+          border-radius: 24px;
+          border: 1px solid rgba(255, 255, 255, 0.08);
+          opacity: 0;
+          transform: translateY(20px) scale(0.8);
+          pointer-events: none;
+          transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+          transform-origin: bottom left;
+        }
+        .menu-opcoes-glass.aberto {
+          opacity: 1;
+          transform: translateY(0) scale(1);
+          pointer-events: all;
+        }
+        .icone-opcao {
+          width: 46px;
+          height: 46px;
+          border-radius: 50%;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-size: 22px;
+          cursor: pointer;
+          box-shadow: 0 4px 10px rgba(0,0,0,0.4);
+          transition: transform 0.2s ease;
+        }
+        .icone-opcao:hover { transform: scale(1.15); }
+        .icone-camera { background: linear-gradient(135deg, #FF9A9E 0%, #FECFEF 100%); }
+        .icone-galeria { background: linear-gradient(135deg, #a18cd1 0%, #fbc2eb 100%); }
+        .icone-arquivo { background: linear-gradient(135deg, #84fab0 0%, #8fd3f4 100%); }
+        .icone-pix { background: linear-gradient(135deg, #f6d365 0%, #fda085 100%); }
+
+/* NOVOS ESTILOS: HORA E TICKS DE LEITURA */
+        .msg-rodape {
+          display: flex;
+          justify-content: flex-end;
+          align-items: center;
+          gap: 6px;
+          font-size: 11px;
+          color: rgba(255, 255, 255, 0.65);
+          margin-top: 2px;
+          margin-bottom: -4px;
+        }
+        .tick-amarelo {
+          color: #FFD700;
+          font-size: 13px;
+          letter-spacing: -2px; /* Junta os dois checks */
+          margin-right: 2px;
+        }
+        .tick-verde-neon {
+          color: #00ff88;
+          font-size: 13px;
+          letter-spacing: -2px; /* Junta os dois checks */
+          margin-right: 2px;
+          text-shadow: 0 0 6px rgba(0, 255, 136, 0.8); /* O brilho futurista */
+        }
+
+/* NOVOS ESTILOS: MENU DE AÇÕES DA MENSAGEM */
+        .menu-mensagem-flutuante {
+          position: absolute;
+          top: -45px;
+          right: 0;
+          display: flex;
+          gap: 8px;
+          background: rgba(17, 27, 33, 0.85);
+          backdrop-filter: blur(8px);
+          -webkit-backdrop-filter: blur(8px);
+          padding: 6px 12px;
+          border-radius: 20px;
+          border: 1px solid rgba(255, 255, 255, 0.1);
+          box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+          z-index: 100;
+          animation: popIn 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
+        }
+        @keyframes popIn {
+          0% { opacity: 0; transform: scale(0.5) translateY(10px); }
+          100% { opacity: 1; transform: scale(1) translateY(0); }
+        }
+        .btn-acao-msg {
+          background: transparent;
+          border: none;
+          color: #fff;
+          font-size: 13px;
+          font-weight: bold;
+          cursor: pointer;
+          display: flex;
+          align-items: center;
+          gap: 4px;
+          padding: 4px 8px;
+          border-radius: 12px;
+          transition: background 0.2s;
+        }
+        .btn-acao-msg:hover { background: rgba(255, 255, 255, 0.1); }
+        .btn-acao-msg.apagar { color: #ff4d4d; }
+
+/* ESTILOS: ÍCONES 3D DO MENU DE MENSAGEM */
+        .icone-3d {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          width: 26px;
+          height: 26px;
+          border-radius: 50%;
+          margin-right: 6px;
+          font-size: 13px;
+          /* O segredo do 3D: Luz no topo esquerdo, Sombra no fundo direito, Sombra projetada */
+          box-shadow: 
+            inset 2px 2px 4px rgba(255, 255, 255, 0.5), 
+            inset -2px -2px 4px rgba(0, 0, 0, 0.4), 
+            2px 3px 5px rgba(0, 0, 0, 0.5);
+          text-shadow: 1px 1px 2px rgba(0,0,0,0.6);
+        }
+        .icone-3d.editar {
+          background: linear-gradient(135deg, #FFD700 0%, #D4AF37 100%);
+        }
+        .icone-3d.apagar {
+          background: linear-gradient(135deg, #ff6b6b 0%, #cc0000 100%);
+        }
+
+/* ESTILOS: REAÇÕES 3D FLUTUANTES */
+        .barra-reacoes-glass {
+          position: absolute;
+          top: -50px;
+          left: 50%;
+          transform: translateX(-50%);
+          display: flex;
+          gap: 12px;
+          background: rgba(255, 255, 255, 0.15);
+          backdrop-filter: blur(15px);
+          -webkit-backdrop-filter: blur(15px);
+          padding: 8px 16px;
+          border-radius: 30px;
+          border: 1px solid rgba(255, 255, 255, 0.2);
+          box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+          z-index: 150;
+          animation: popUpReacoes 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
+        }
+        @keyframes popUpReacoes {
+          0% { opacity: 0; transform: translateX(-50%) scale(0.5) translateY(20px); }
+          100% { opacity: 1; transform: translateX(-50%) scale(1) translateY(0); }
+        }
+        .emoji-reacao-btn {
+          font-size: 26px;
+          background: transparent;
+          border: none;
+          cursor: pointer;
+          transition: transform 0.2s ease;
+          filter: drop-shadow(0 4px 6px rgba(0,0,0,0.4)); /* Dá o efeito 3D no emoji */
+        }
+        .emoji-reacao-btn:hover {
+          transform: scale(1.4) translateY(-5px);
+        }
+        .badge-reacao {
+          position: absolute;
+          bottom: -12px;
+          right: 20px;
+          background: #202c33;
+          border: 1.5px solid #00a884;
+          border-radius: 12px;
+          padding: 2px 6px;
+          font-size: 13px;
+          display: flex;
+          align-items: center;
+          gap: 4px;
+          box-shadow: 0 2px 5px rgba(0,0,0,0.5);
+          animation: popIn 0.3s ease;
+          z-index: 5;
+        }
+
       `}</style>
 
       {/* HEADER SUPERIOR */}
@@ -1038,17 +1316,16 @@ export default function Mensagens() {
                   @{conversaAberta.outroUsuario?.username || conversaAberta.outroUsuario?.nome}
                 </strong>
                 <p style={{ color: '#00a884', fontSize: 11, margin: 0, fontWeight: 'bold' }}>
-                  Conexão Privada Ativa
+                  Conexao Privada Ativa
                 </p>
               </div>
-
-              {/* BOTÕES DE CHAMADA */}
+              {/* BOTOES DE CHAMADA */}
               <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
                 <button
                   type="button"
                   onClick={() => iniciarChamada('video')}
                   style={{ width: 40, height: 40, borderRadius: '50%', backgroundColor: '#2a3942', border: '1.5px solid #374151', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}
-                  title="Chamada de Vídeo"
+                  title="Chamada de Video"
                 >
                   <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#e9edef" strokeWidth="2"><path d="M23 7l-7 5 7 5V7z" /><rect x="1" y="5" width="15" height="14" rx="3" ry="3" /></svg>
                 </button>
@@ -1056,29 +1333,134 @@ export default function Mensagens() {
                   type="button"
                   onClick={() => iniciarChamada('audio')}
                   style={{ width: 42, height: 42, borderRadius: '50%', backgroundColor: '#ff4d4d', border: '2.5px solid #000', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}
-                  title="Chamada de Áudio"
+                  title="Chamada de Audio"
                 >
                   <svg width="18" height="18" viewBox="0 0 24 24" fill="#000" stroke="#000" strokeWidth="1"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z" /></svg>
                 </button>
               </div>
             </div>
 
-            {/* ÁREA DE MENSAGENS */}
-            <div style={areaMensagens} ref={areaMensagensRef}>
+            {/* AREA DE MENSAGENS */}
+            <div 
+              style={areaMensagens} 
+              ref={areaMensagensRef}
+              onClick={() => { setMensagemOpcoesId(null); setMensagemReacaoId(null); }}
+            >
               {mensagens.map((mensagem) => {
                 const minha = mensagem.remetente_id === usuarioAtual?.id
+                const horaFormatada = new Date(mensagem.criado_em).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+
                 return (
                   <div key={mensagem.id} style={minha ? linhaMinhaMensagem : linhaOutraMensagem}>
-                    <div style={minha ? minhaMensagem : outraMensagem}>
-                      <p style={{ margin: 0 }}>{mensagem.texto}</p>
+                    <div 
+                      style={{
+                        ...(minha ? minhaMensagem : outraMensagem),
+                        position: 'relative',
+                        cursor: 'pointer'
+                      }}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setMensagemReacaoId(null);
+                        if (minha) {
+                          setMensagemOpcoesId(mensagemOpcoesId === mensagem.id ? null : mensagem.id)
+                        }
+                      }}
+                      onDoubleClick={(e) => {
+                        e.stopPropagation();
+                        setMensagemOpcoesId(null);
+                        setMensagemReacaoId(mensagemReacaoId === mensagem.id ? null : mensagem.id);
+                      }}
+                    >
+                      {/* BARRA DE REACOES FLUTUANTE */}
+                      {mensagemReacaoId === mensagem.id && (
+                        <div className="barra-reacoes-glass">
+                          {['👍', '❤️', '😂', '😮', '🔥'].map(emoji => (
+                            <button key={emoji} className="emoji-reacao-btn" onClick={(e) => { e.stopPropagation(); reagirMensagem(mensagem.id, emoji); }}>
+                              {emoji}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* O MENU FLUTUANTE 3D (Editar/Apagar) */}
+                      {mensagemOpcoesId === mensagem.id && (
+                        <div className="menu-mensagem-flutuante">
+                          <button className="btn-acao-msg" onClick={(e) => { e.stopPropagation(); iniciarEdicao(mensagem); }}>
+                            <span className="icone-3d editar">✏️</span> Editar
+                          </button>
+                          <button className="btn-acao-msg apagar" onClick={(e) => { e.stopPropagation(); apagarMensagem(mensagem.id); }}>
+                            <span className="icone-3d apagar">🗑️</span> Apagar
+                          </button>
+                        </div>
+                      )}
+
+                      <p style={{ margin: 0, paddingBottom: 2 }}>{mensagem.texto}</p>
+                      
+                      <div className="msg-rodape">
+                        <span>{horaFormatada}</span>
+                        {minha && (
+                          <span className={mensagem.lida ? 'tick-verde-neon' : 'tick-amarelo'}>
+                            ✓✓
+                          </span>
+                        )}
+                      </div>
+
+                      {/* SELO DE REACAO (O EMOJI GRUDADO NA MENSAGEM) */}
+                      {mensagem.reacoes && Object.keys(mensagem.reacoes).length > 0 && (
+                        <div className="badge-reacao">
+                          {Object.values(mensagem.reacoes).filter((v, i, a) => a.indexOf(v) === i).join(' ')}
+                          {Object.keys(mensagem.reacoes).length > 1 && (
+                            <span style={{ color: '#00a884', fontWeight: 'bold' }}>
+                              {Object.keys(mensagem.reacoes).length}
+                            </span>
+                          )}
+                        </div>
+                      )}
                     </div>
                   </div>
                 )
               })}
             </div>
 
+            {/* INDICADOR DE EDICAO */}
+            {mensagemEditando && (
+              <div style={{ background: '#202c33', padding: '10px 16px', borderLeft: '4px solid #00a884', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div style={{ overflow: 'hidden' }}>
+                  <small style={{ color: '#00a884', fontWeight: 'bold', display: 'block', marginBottom: 2 }}>✏️ Editando mensagem...</small>
+                  <span style={{ color: '#8696a0', fontSize: 13, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', display: 'block' }}>
+                    {mensagemEditando.texto}
+                  </span>
+                </div>
+                <button 
+                  onClick={() => { setMensagemEditando(null); setNovaMensagem(''); }} 
+                  style={{ background: 'transparent', border: 'none', color: '#8696a0', fontSize: 24, cursor: 'pointer' }}
+                  title="Cancelar edicao"
+                >
+                  ×
+                </button>
+              </div>
+            )}
+
             {/* CAIXA DE ENVIO */}
             <div style={caixaEnviar}>
+              {/* NOVO MENU DE ANEXOS */}
+              <div className="menu-anexos-container">
+                <div className={`menu-opcoes-glass ${menuAnexosAberto ? 'aberto' : ''}`}>
+                  <div className="icone-opcao icone-camera" title="Camera">📷</div>
+                  <div className="icone-opcao icone-galeria" title="Galeria">🖼️</div>
+                  <div className="icone-opcao icone-arquivo" title="Documento">📄</div>
+                  <div className="icone-opcao icone-pix" title="Pix">💸</div>
+                </div>
+                
+                <button 
+                  className={`btn-mais-flutuante ${menuAnexosAberto ? 'aberto' : ''}`}
+                  onClick={() => setMenuAnexosAberto(!menuAnexosAberto)}
+                  title="Anexar"
+                >
+                  +
+                </button>
+              </div>
+
               <input
                 placeholder="Escreva uma mensagem..."
                 value={novaMensagem}
@@ -1130,8 +1512,7 @@ export default function Mensagens() {
                           @{perfil.username || perfil.nome}
                         </strong>
                         <small style={{ fontSize: 11, color: '#65676b', display: 'block' }}>
-                          {perfil.nome ?? 'Perfil do Brazilzão'}
-                        </small>
+                          {perfil.nome ?? 'Perfil do Brazilzao'}</small>
                       </div>
                       <span style={{ fontSize: 11, background: '#e6f4ea', color: '#008C3A', padding: '2px 8px', borderRadius: 10, fontWeight: 'bold' }}>
                         Autorizar

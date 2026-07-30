@@ -1,4 +1,4 @@
-package com.brazilzao.app; // Verifique se o nome do pacote é o mesmo da sua MainActivity.java
+package com.brazilzao.app;
 
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
@@ -24,12 +24,13 @@ public class MyFirebaseMessagingService extends FirebaseMessagingService {
             if ("true".equals(ehChamada)) {
                 String remetenteNome = remoteMessage.getData().get("remetenteNome");
                 String conversaId = remoteMessage.getData().get("conversaId");
-                dispararChamadaTelaCheia(remetenteNome, conversaId);
+                String tipo = remoteMessage.getData().get("tipo");
+                dispararChamadaTelaCheia(remetenteNome, conversaId, tipo);
             }
         }
     }
 
-    private void dispararChamadaTelaCheia(String remetenteNome, String conversaId) {
+    private void dispararChamadaTelaCheia(String remetenteNome, String conversaId, String tipo) {
         NotificationManager notificationManager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
         String channelId = "chamadas_nativas_channel";
 
@@ -42,24 +43,25 @@ public class MyFirebaseMessagingService extends FirebaseMessagingService {
                     .build();
 
             NotificationChannel channel = new NotificationChannel(
-                    channelId,
-                    "Chamadas de Entrada",
-                    NotificationManager.IMPORTANCE_HIGH
+                    channelId, "Chamadas de Entrada", NotificationManager.IMPORTANCE_HIGH
             );
-            channel.setDescription("Acende a tela e toca campainha em chamadas recebidas");
+            channel.setDescription("Acende a tela em chamadas recebidas");
             channel.setSound(ringtoneUri, audioAttributes);
             channel.enableVibration(true);
             channel.setVibrationPattern(new long[]{0, 1000, 500, 1000, 500, 1000});
-
-            if (notificationManager != null) {
-                notificationManager.createNotificationChannel(channel);
-            }
+            if (notificationManager != null) notificationManager.createNotificationChannel(channel);
         }
 
-        // Intent de Tela Cheia (Acende o visor e abre a MainActivity do App)
-        Intent fullScreenIntent = new Intent(this, MainActivity.class);
-        fullScreenIntent.putExtra("conversaId", conversaId);
+        // DEEP LINK: Força o React a ler os dados da chamada!
+        String uriString = "brazilzao://chamada?conversaId=" + conversaId + "&nome=" + remetenteNome + "&tipo=" + tipo;
+        Intent fullScreenIntent = new Intent(Intent.ACTION_VIEW, Uri.parse(uriString));
+        fullScreenIntent.setPackage(getPackageName());
         fullScreenIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+
+        // Tentativa agressiva de acender a tela por cima de tudo
+        try {
+            startActivity(fullScreenIntent);
+        } catch (Exception e) {}
 
         PendingIntent fullScreenPendingIntent = PendingIntent.getActivity(
                 this, 0, fullScreenIntent,
@@ -69,12 +71,13 @@ public class MyFirebaseMessagingService extends FirebaseMessagingService {
         NotificationCompat.Builder builder = new NotificationCompat.Builder(this, channelId)
                 .setSmallIcon(android.R.drawable.stat_sys_phone_call)
                 .setContentTitle("📞 Chamada Recebida!")
-                .setContentText("@" + remetenteNome + " está te ligando no Papo BR...")
+                .setContentText("@" + remetenteNome + " está te ligando...")
                 .setPriority(NotificationCompat.PRIORITY_MAX)
                 .setCategory(NotificationCompat.CATEGORY_CALL)
                 .setSound(ringtoneUri)
                 .setVibrate(new long[]{0, 1000, 500, 1000, 500, 1000})
                 .setAutoCancel(true)
+                .setContentIntent(fullScreenPendingIntent)
                 .setFullScreenIntent(fullScreenPendingIntent, true);
 
         if (notificationManager != null) {
