@@ -36,30 +36,18 @@ export async function POST(req: Request) {
       )
     }
 
+    // PAYLOAD PURO DE DADOS (Informa a camada nativa do Android)
     const message = {
       token: token,
-      notification: {
-        title: `📞 Chamada de ${tipo === 'video' ? 'Vídeo' : 'Áudio'} Recebida!`,
-        body: `@${remetenteNome} está te ligando no Papo BR...`
-      },
       data: {
         conversaId: String(conversaId || ''),
         tipo: String(tipo || ''),
-        link: `/mensagens?para=${conversaId}`,
+        remetenteNome: String(remetenteNome || ''),
         ehChamada: 'true'
       },
       android: {
         priority: 'high' as const,
-        ttl: 30000, // Chamada expira em 30 segundos
-        notification: {
-          sound: 'ringtone',
-          priority: 'max' as const,
-          channelId: 'chamadas_channel',
-          visibility: 'public' as const,
-          defaultSound: false,
-          defaultVibrateTimings: false,
-          vibrateTimingsMillis: [0, 1000, 500, 1000, 500, 1000, 500, 1000] // Padrão contínuo de vibração
-        }
+        ttl: 0
       }
     }
 
