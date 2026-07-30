@@ -84,25 +84,27 @@ function criarTrackVideoPreta(width = 640, height = 480): MediaStreamTrack {
   return stream.getVideoTracks()[0]
 }
 
-// 2. Captura mídias sem travar se faltar mic ou webcam (ideal para PCs de mesa)
 async function obterStreamComFallback(tipo: 'audio' | 'video', modoCamera: string): Promise<MediaStream> {
   const stream = new MediaStream()
 
+  // Captura do Microfone
   try {
     const audioStream = await navigator.mediaDevices.getUserMedia({ audio: AUDIO_CONSTRAINTS })
     audioStream.getAudioTracks().forEach((track) => stream.addTrack(track))
   } catch (e) {
-    console.warn('⚠️ Nenhum microfone encontrado. Chamada continuará sem áudio local.')
+    console.warn('⚠️ Nenhum microfone encontrado. Ligação continuará sem áudio local.')
   }
 
+  // Captura da Câmera (Com suporte flexível para PC)
   if (tipo === 'video') {
     try {
+      // Tenta abrir a câmera de forma resiliente
       const videoStream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: modoCamera }
+        video: true
       })
       videoStream.getVideoTracks().forEach((track) => stream.addTrack(track))
     } catch (e) {
-      console.warn('⚠️ Nenhuma câmera encontrada. Enviando tela preta sintética.')
+      console.warn('⚠️ Nenhuma câmera encontrada. Ativando tela preta sintética sem travar a chamada.')
       const trackPreta = criarTrackVideoPreta()
       stream.addTrack(trackPreta)
     }

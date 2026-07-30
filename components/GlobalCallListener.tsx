@@ -1,79 +1,180 @@
 'use client'
 
-import { useEffect } from 'react'
+import { useEffect, useState, useRef } from 'react'
 import { useRouter } from 'next/navigation'
-import { supabase } from '../utils/supabase/client'
-import { Capacitor } from '@capacitor/core'
+import { supabase } from '@/utils/supabase/client'
 
 export default function GlobalCallListener() {
   const router = useRouter()
+  const [chamadaRecebida, setChamadaRecebida] = useState<any>(null)
+  const audioCtxRef = useRef<AudioContext | null>(null)
+  const ringtoneIntervalRef = useRef<NodeJS.Timeout | null>(null)
 
   useEffect(() => {
-    iniciarEscutaGlobal()
-  }, [])
+    let canal: any = null
 
-  async function iniciarEscutaGlobal() {
-    const { data: sessao } = await supabase.auth.getSession()
-    const user = sessao.session?.user
-    if (!user) return
+    async function escutarChamadasGlobais() {
+      const { data: sessao } = await supabase.auth.getSession()
+      const meuId = sessao.session?.user?.id
+      if (!meuId) return
 
-    if (Capacitor.isNativePlatform()) {
-      try {
-        const { PushNotifications } = await import('@capacitor/push-notifications')
-
-        // 1. CRIA O CANAL DE ALTA PRIORIDADE PRIMEIRO
-        await PushNotifications.createChannel({
-          id: 'chamadas_channel',
-          name: 'Chamadas de Voz e Vídeo',
-          description: 'Notificações de chamadas recebidas',
-          importance: 5, // Prioridade Máxima
-          visibility: 1, // Visível na tela bloqueada
-          sound: 'default',
-          vibration: true
+      canal = supabase
+        .channel(`chamadas-pessoal-${meuId}`)
+        .on('broadcast', { event: 'solicitar_chamada' }, (payload) => {
+          const { remetente, tipo, conversaId } = payload.payload
+          setChamadaRecebida({ remetente, tipo, conversaId })
+          tocarSomEVibracao()
         })
-
-        // 2. REGISTRA OS OUVINTES PRIMEIRO (OBRIGATÓRIO ESTAR ANTES DO REGISTER)
-        PushNotifications.addListener('registration', async (token) => {
-          if (token.value) {
-            console.log('Token FCM capturado com sucesso:', token.value)
-            await supabase
-              .from('profiles')
-              .update({ fcm_token: token.value })
-              .eq('id', user.id)
-          }
-        })
-
-        PushNotifications.addListener('pushNotificationActionPerformed', (notification) => {
-          const data = notification.notification.data
-          if (data?.conversaId || data?.link) {
-            router.push(data.link || `/mensagens?para=${data.conversaId}`)
-          }
-        })
-
-        // 3. SOLICITA PERMISSÃO E DISPARA O REGISTRO SÓ AGORA
-        let permStatus = await PushNotifications.checkPermissions()
-        if (permStatus.receive === 'prompt') {
-          permStatus = await PushNotifications.requestPermissions()
-        }
-
-        if (permStatus.receive === 'granted') {
-          await PushNotifications.register()
-        }
-
-      } catch (e) {
-        console.error('Erro ao configurar Push Notifications:', e)
-      }
+        .subscribe()
     }
 
-    // 4. ESCUTA TEMPO REAL QUANDO O APP ESTIVER ABERTO
-    const canalPessoal = supabase
-      .channel(`chamadas-pessoal-global-${user.id}`)
-      .on('broadcast', { event: 'solicitar_chamada' }, (payload) => {
-        const { remetente } = payload.payload
-        router.push(`/mensagens?para=${remetente.id}`)
-      })
-      .subscribe()
+    escutarChamadasGlobais()
+
+    return () => {
+      if (canal) supabase.removeChannel(canal)
+      pararSomEVibracao()
+    }
+  }, [])
+
+  function iniciarAudioContext() {
+    try {
+      if (!audioCtxRef.current) {
+        const AudioCtx = window.AudioContext || (window as any).webkitAudioContext
+        if (AudioCtx) audioCtxRef.current = new AudioCtx()
+      }
+      if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
+        audioCtxRef.current.resume()
+      }
+    } catch (e) {}
   }
 
-  return null
+  function tocarSomEVibracao() {
+    pararSomEVibracao()
+    iniciarAudioContext()
+
+    // 1. Vibração contínua
+    if (typeof navigator !== 'undefined' && navigator.vibrate) {
+      navigator.vibrate([1000, 800, 1000, 800, 1000, 800, 1000, 800])
+    }
+
+    // 2. Som de toque telefônico em tom duplo (440Hz + 480Hz)
+    const ctx = audioCtxRef.current
+    const tocarCampainha = () => {
+      if (!ctx || ctx.state === 'closed') return
+      try {
+        const agora = ctx.currentTime
+        const osc1 = ctx.createOscillator()
+        const osc2 = ctx.createOscillator()
+        const gain = ctx.createGain()
+
+        osc1.type = 'sine'
+        osc2.type = 'sine'
+        osc1.frequency.setValueAtTime(440, agora)
+        osc2.frequency.setValueAtTime(480, agora)
+
+        gain.gain.setValueAtTime(0, agora)
+        gain.gain.linearRampToValueAtTime(0.3, agora + 0.1)
+        gain.gain.setValueAtTime(0.3, agora + 1.8)
+        gain.gain.linearRampToValueAtTime(0, agora + 2.0)
+
+        osc1.connect(gain)
+        osc2.connect(gain)
+        gain.connect(ctx.destination)
+
+        osc1.start(agora)
+        osc2.start(agora)
+        osc1.stop(agora + 2.0)
+        osc2.stop(agora + 2.0)
+      } catch (e) {}
+    }
+
+    tocarCampainha()
+    ringtoneIntervalRef.current = setInterval(tocarCampainha, 3000)
+  }
+
+  function pararSomEVibracao() {
+    if (ringtoneIntervalRef.current) {
+      clearInterval(ringtoneIntervalRef.current)
+      ringtoneIntervalRef.current = null
+    }
+    if (typeof navigator !== 'undefined' && navigator.vibrate) {
+      navigator.vibrate(0)
+    }
+  }
+
+  function aceitarChamada() {
+    pararSomEVibracao()
+    const target = `/mensagens?para=${chamadaRecebida.remetente.id}&atender=true`
+    setChamadaRecebida(null)
+    router.push(target)
+  }
+
+  function recusarChamada() {
+    pararSomEVibracao()
+    setChamadaRecebida(null)
+  }
+
+  if (!chamadaRecebida) return null
+
+  return (
+    <div style={overlayFull}>
+      <div style={{ textAlign: 'center', color: '#fff', padding: 20 }}>
+        <span style={{ fontSize: 13, color: '#00a884', fontWeight: 'bold', textTransform: 'uppercase' }}>
+          📞 Chamada de {chamadaRecebida.tipo === 'video' ? 'Vídeo' : 'Áudio'} Recebida
+        </span>
+
+        <div style={avatarBox}>
+          {chamadaRecebida.remetente?.foto_url ? (
+            <img src={chamadaRecebida.remetente.foto_url} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+          ) : (
+            <span style={{ fontSize: 44, color: '#fff' }}>
+              {chamadaRecebida.remetente?.nome?.charAt(0).toUpperCase() || 'U'}
+            </span>
+          )}
+        </div>
+
+        <h2 style={{ fontSize: 26, margin: '12px 0 4px 0', fontWeight: 'bold' }}>
+          @{chamadaRecebida.remetente?.username || chamadaRecebida.remetente?.nome}
+        </h2>
+        <p style={{ fontSize: 14, color: '#FFD700', margin: 0, fontWeight: 'bold' }}>
+          Papo BR - Conexão Direta
+        </p>
+
+        <div style={{ display: 'flex', gap: 40, justifyContent: 'center', marginTop: 40 }}>
+          <button onClick={recusarChamada} style={{ width: 68, height: 68, borderRadius: '50%', backgroundColor: '#ef4444', border: 'none', color: '#fff', fontSize: 26, cursor: 'pointer', boxShadow: '0 4px 15px rgba(239, 68, 68, 0.4)' }}>
+            ❌
+          </button>
+          <button onClick={aceitarChamada} style={{ width: 68, height: 68, borderRadius: '50%', backgroundColor: '#22c55e', border: 'none', color: '#fff', fontSize: 26, cursor: 'pointer', boxShadow: '0 4px 15px rgba(34, 197, 94, 0.4)' }}>
+            📞
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+const overlayFull = {
+  position: 'fixed' as const,
+  top: 0,
+  left: 0,
+  width: '100vw',
+  height: '100vh',
+  background: '#111b21',
+  zIndex: 999999,
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center'
+}
+
+const avatarBox = {
+  width: 120,
+  height: 120,
+  borderRadius: '50%',
+  background: '#008C3A',
+  margin: '24px auto',
+  overflow: 'hidden',
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  boxShadow: '0 0 35px rgba(0, 168, 132, 0.4)'
 }
