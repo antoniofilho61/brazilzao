@@ -130,6 +130,8 @@ export default function Mensagens() {
   const [mensagemOpcoesId, setMensagemOpcoesId] = useState<string | null>(null)
   const [mensagemEditando, setMensagemEditando] = useState<Mensagem | null>(null) 
   const [mensagemReacaoId, setMensagemReacaoId] = useState<string | null>(null)
+  const ultimoToqueRef = useRef<{ id: string, time: number }>({ id: '', time: 0 })
+const [contatoOnline, setContatoOnline] = useState(false)
 
   // MODAL ADICIONAR POR ID
   const [modalAdicionarIDAberto, setModalAdicionarIDAberto] = useState(false)
@@ -251,6 +253,34 @@ export default function Mensagens() {
       supabase.removeChannel(canalPessoal)
     }
   }, [usuarioAtual?.id])
+
+// RASTREADOR DE PRESENÇA (ONLINE/OFFLINE)
+  useEffect(() => {
+    if (!conversaAberta || !usuarioAtual) return
+
+    const canalPresenca = supabase.channel(`presenca-${conversaAberta.id}`)
+
+    canalPresenca
+      .on('presence', { event: 'sync' }, () => {
+        const estado = canalPresenca.presenceState()
+        // Pega os IDs de todos que estão online nessa conversa agora
+        const idsOnline = Object.values(estado).flatMap((p: any) => p.map((u: any) => u.user_id))
+        
+        // Se o ID do seu amigo estiver na lista, ele está online!
+        setContatoOnline(idsOnline.includes(conversaAberta.outroUsuario?.id))
+      })
+      .subscribe(async (status) => {
+        if (status === 'SUBSCRIBED') {
+          // Avisa o servidor que VOCÊ entrou na conversa
+          await canalPresenca.track({ user_id: usuarioAtual.id })
+        }
+      })
+
+    return () => {
+      supabase.removeChannel(canalPresenca) // Sai do canal ao fechar a conversa
+      setContatoOnline(false)
+    }
+  }, [conversaAberta, usuarioAtual])
 
   async function conectarSalaSinalizacao(salaId: string) {
     if (canalSalaRef.current) {
@@ -1174,8 +1204,6 @@ async function reagirMensagem(mensagemId: string, emoji: string) {
         .barra-reacoes-glass {
           position: absolute;
           top: -50px;
-          left: 50%;
-          transform: translateX(-50%);
           display: flex;
           gap: 12px;
           background: rgba(255, 255, 255, 0.15);
@@ -1189,8 +1217,8 @@ async function reagirMensagem(mensagemId: string, emoji: string) {
           animation: popUpReacoes 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
         }
         @keyframes popUpReacoes {
-          0% { opacity: 0; transform: translateX(-50%) scale(0.5) translateY(20px); }
-          100% { opacity: 1; transform: translateX(-50%) scale(1) translateY(0); }
+          0% { opacity: 0; transform: scale(0.5) translateY(20px); }
+          100% { opacity: 1; transform: scale(1) translateY(0); }
         }
         .emoji-reacao-btn {
           font-size: 26px;
@@ -1218,6 +1246,41 @@ async function reagirMensagem(mensagemId: string, emoji: string) {
           box-shadow: 0 2px 5px rgba(0,0,0,0.5);
           animation: popIn 0.3s ease;
           z-index: 5;
+        }
+
+/* ESTILOS: STATUS ONLINE NEON */
+        .avatar-online-ring {
+          box-shadow: 0 0 0 2px #111b21, 0 0 0 4px #00ff88, 0 0 10px rgba(0, 255, 136, 0.6);
+          animation: pulsarNeon 2s infinite alternate;
+        }
+        @keyframes pulsarNeon {
+          from { box-shadow: 0 0 0 2px #111b21, 0 0 0 3px #00ff88, 0 0 8px rgba(0, 255, 136, 0.3); }
+          to { box-shadow: 0 0 0 2px #111b21, 0 0 0 4px #00ff88, 0 0 15px rgba(0, 255, 136, 0.8); }
+        }
+        .status-texto-online {
+          color: #00ff88 !important;
+          text-shadow: 0 0 6px rgba(0, 255, 136, 0.5);
+        }
+
+.chat-wallpaper-custom {
+          background-color: #0b141a;
+          position: relative;
+        }
+
+        /* Camada de textura com o papel de parede escuro */
+        .chat-wallpaper-custom::before {
+          content: "";
+          position: fixed; /* O "fixed" faz a imagem travar e cobrir a tela toda */
+          top: 0; 
+          left: 0; 
+          width: 100vw;
+          height: 100vh;
+          background-image: url('/fundo-escuro.png'); 
+          background-repeat: repeat; 
+          background-size: 250px; 
+          opacity: 0.15; 
+          pointer-events: none;
+          z-index: 0;
         }
 
       `}</style>
@@ -1304,9 +1367,10 @@ async function reagirMensagem(mensagemId: string, emoji: string) {
               >
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#e9edef" strokeWidth="2.5"><line x1="19" y1="12" x2="5" y2="12" /><polyline points="12 19 5 12 12 5" /></svg>
               </button>
-              <div style={avatarTopoConversa}>
+              {/* FOTO COM O ANEL NEON (Se estiver online) */}
+              <div style={avatarTopoConversa} className={contatoOnline ? 'avatar-online-ring' : ''}>
                 {conversaAberta.outroUsuario?.foto_url ? (
-                  <img src={conversaAberta.outroUsuario.foto_url} alt="" style={fotoAvatar} />
+                  <img src={conversaAberta.outroUsuario.foto_url} alt="" style={{...fotoAvatar, borderRadius: '50%'}} />
                 ) : (
                   conversaAberta.outroUsuario?.nome?.charAt(0)?.toUpperCase() ?? 'B'
                 )}
@@ -1315,9 +1379,24 @@ async function reagirMensagem(mensagemId: string, emoji: string) {
                 <strong style={{ color: '#e9edef', fontSize: 15, display: 'block' }}>
                   @{conversaAberta.outroUsuario?.username || conversaAberta.outroUsuario?.nome}
                 </strong>
-                <p style={{ color: '#00a884', fontSize: 11, margin: 0, fontWeight: 'bold' }}>
-                  Conexao Privada Ativa
-                </p>
+                
+                {/* TEXTO DE STATUS MÁGICO COM HORA */}
+                {(() => {
+                  // Busca a última mensagem enviada por essa pessoa na conversa
+                  const ultimaDele = [...mensagens].reverse().find(m => m.remetente_id === conversaAberta.outroUsuario?.id);
+                  const textoVisto = ultimaDele 
+                    ? `Visto por último às ${new Date(ultimaDele.criado_em).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+                    : 'Visto por último recentemente';
+
+                  return (
+                    <p 
+                      style={{ color: '#8696a0', fontSize: 12, margin: 0, fontWeight: 'bold', transition: 'color 0.3s' }}
+                      className={contatoOnline ? 'status-texto-online' : ''}
+                    >
+                      {contatoOnline ? 'Ativo Agora' : textoVisto}
+                    </p>
+                  )
+                })()}
               </div>
               {/* BOTOES DE CHAMADA */}
               <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
@@ -1340,9 +1419,10 @@ async function reagirMensagem(mensagemId: string, emoji: string) {
               </div>
             </div>
 
-            {/* AREA DE MENSAGENS */}
+            {/* AREA DE MENSAGENS COM PAPEL DE PAREDE */}
             <div 
               style={areaMensagens} 
+              className="chat-wallpaper-custom"
               ref={areaMensagensRef}
               onClick={() => { setMensagemOpcoesId(null); setMensagemReacaoId(null); }}
             >
@@ -1360,20 +1440,36 @@ async function reagirMensagem(mensagemId: string, emoji: string) {
                       }}
                       onClick={(e) => {
                         e.stopPropagation();
-                        setMensagemReacaoId(null);
-                        if (minha) {
-                          setMensagemOpcoesId(mensagemOpcoesId === mensagem.id ? null : mensagem.id)
+                        
+                        const agora = Date.now();
+                        const tempoPassado = agora - ultimoToqueRef.current.time;
+                        const mesmaMensagem = ultimoToqueRef.current.id === mensagem.id;
+
+                        if (mesmaMensagem && tempoPassado < 400) {
+                          // === DUPLO TOQUE (CELULAR E PC) ===
+                          setMensagemOpcoesId(null);
+                          setMensagemReacaoId(mensagemReacaoId === mensagem.id ? null : mensagem.id);
+                          ultimoToqueRef.current = { id: '', time: 0 }; // Reseta a memória
+                        } else {
+                          // === TOQUE SIMPLES ===
+                          ultimoToqueRef.current = { id: mensagem.id, time: agora }; // Salva a hora deste toque
+                          
+                          setMensagemReacaoId(null); // Esconde reações
+                          if (minha) {
+                            setMensagemOpcoesId(mensagemOpcoesId === mensagem.id ? null : mensagem.id);
+                          }
                         }
                       }}
-                      onDoubleClick={(e) => {
-                        e.stopPropagation();
-                        setMensagemOpcoesId(null);
-                        setMensagemReacaoId(mensagemReacaoId === mensagem.id ? null : mensagem.id);
-                      }}
                     >
-                      {/* BARRA DE REACOES FLUTUANTE */}
+                      {/* BARRA DE REAÇÕES FLUTUANTE */}
                       {mensagemReacaoId === mensagem.id && (
-                        <div className="barra-reacoes-glass">
+                        <div 
+                          className="barra-reacoes-glass"
+                          style={{
+                            left: minha ? 'auto' : '0',
+                            right: minha ? '0' : 'auto'
+                          }}
+                        >
                           {['👍', '❤️', '😂', '😮', '🔥'].map(emoji => (
                             <button key={emoji} className="emoji-reacao-btn" onClick={(e) => { e.stopPropagation(); reagirMensagem(mensagem.id, emoji); }}>
                               {emoji}
