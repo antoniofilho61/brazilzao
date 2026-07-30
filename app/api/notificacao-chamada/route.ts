@@ -14,7 +14,6 @@ if (!getApps().length) {
   })
 }
 
-// RESPOSTA PARA VERIFICAÇÃO PREFLIGHT DO NAVEGADOR E CELULAR (CORS)
 export async function OPTIONS() {
   return new Response(null, {
     status: 204,
@@ -33,10 +32,7 @@ export async function POST(req: Request) {
     if (!token) {
       return NextResponse.json(
         { success: false, error: 'Token FCM ausente' },
-        {
-          status: 400,
-          headers: { 'Access-Control-Allow-Origin': '*' }
-        }
+        { status: 400, headers: { 'Access-Control-Allow-Origin': '*' } }
       )
     }
 
@@ -49,17 +45,20 @@ export async function POST(req: Request) {
       data: {
         conversaId: String(conversaId || ''),
         tipo: String(tipo || ''),
-        link: `/mensagens?para=${conversaId}`
+        link: `/mensagens?para=${conversaId}`,
+        ehChamada: 'true'
       },
       android: {
         priority: 'high' as const,
+        ttl: 30000, // Chamada expira em 30 segundos
         notification: {
-          sound: 'ringtone', // Mudado de 'default' para 'ringtone'
+          sound: 'ringtone',
           priority: 'max' as const,
           channelId: 'chamadas_channel',
           visibility: 'public' as const,
           defaultSound: false,
-          defaultVibrateTimings: true
+          defaultVibrateTimings: false,
+          vibrateTimingsMillis: [0, 1000, 500, 1000, 500, 1000, 500, 1000] // Padrão contínuo de vibração
         }
       }
     }
@@ -68,19 +67,13 @@ export async function POST(req: Request) {
 
     return NextResponse.json(
       { success: true },
-      {
-        status: 200,
-        headers: { 'Access-Control-Allow-Origin': '*' }
-      }
+      { status: 200, headers: { 'Access-Control-Allow-Origin': '*' } }
     )
   } catch (error: any) {
     console.error('Erro ao enviar Push FCM:', error)
     return NextResponse.json(
       { success: false, error: error.message },
-      {
-        status: 500,
-        headers: { 'Access-Control-Allow-Origin': '*' }
-      }
+      { status: 500, headers: { 'Access-Control-Allow-Origin': '*' } }
     )
   }
 }
