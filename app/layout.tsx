@@ -1,4 +1,6 @@
-import './globals.css' // ou seus imports de estilo
+import './globals.css'
+import BottomNav from '@/components/BottomNav'
+import GlobalCallListener from '@/components/GlobalCallListener'
 
 export const metadata = {
   title: 'Brazilzão',
@@ -13,7 +15,6 @@ export const viewport = {
   viewportFit: 'cover'
 }
 
-// ⚠️ O Next.js EXIGE essa palavra "export default" na função do RootLayout
 export default function RootLayout({
   children,
 }: {
@@ -21,7 +22,18 @@ export default function RootLayout({
 }) {
   return (
     <html lang="pt-BR">
-      <body>{children}</body>
+      <body style={{ margin: 0, padding: 0 }}>
+        {/* ESCUTA GLOBAL DE CHAMADAS & REGISTRO PUSH FCM */}
+        <GlobalCallListener />
+
+        {/* Espaçamento no rodapé para o menu não cobrir o final da página */}
+        <main style={{ paddingBottom: '80px' }}>
+          {children}
+        </main>
+
+        {/* BARRA INFERIOR 3D */}
+        <BottomNav />
+      </body>
     </html>
   )
 }

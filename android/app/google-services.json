@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "902664061964",
+    "project_id": "brazilzao-7e4af",
+    "storage_bucket": "brazilzao-7e4af.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:902664061964:android:56059ab6979c9d93cd1a29",
+        "android_client_info": {
+          "package_name": "com.brazilzao.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDR59qjV8SPNcUxzPKR5U0Hnder8vYxxyo"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

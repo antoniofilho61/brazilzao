@@ -1,10 +1,9 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  output: 'export',
+  output: 'export', // 👈 OBRIGATÓRIO para o Capacitor ler o novo código!
   images: {
-    unoptimized: true,
+    unoptimized: true, // Evita erro ao compilar imagens no build estático
   },
-  trailingSlash: true,
 }
 
 module.exports = nextConfig

@@ -1,8 +1,9 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
 import { supabase } from '@/utils/supabase/client'
+import { useNotificacoesRealtime } from './useNotificacoesRealtime'
 
 type Notificacao = {
   id: string
@@ -23,6 +24,7 @@ export default function Notificacoes() {
   const [carregando, setCarregando] = useState(true)
   const [notificacoes, setNotificacoes] = useState<Notificacao[]>([])
   const [naoLidasCount, setNaoLidasCount] = useState(0)
+  const [meuUserId, setMeuUserId] = useState<string | null>(null)
 
   function tocarSom() {
     try {
@@ -31,47 +33,7 @@ export default function Notificacoes() {
     } catch (error) {}
   }
 
-  useEffect(() => {
-    carregarNotificacoes()
-
-    let canal: any = null
-
-    async function inicializarRealtime() {
-      const { data: sessao } = await supabase.auth.getSession()
-      const userId = sessao.session?.user?.id
-      if (!userId) return
-
-      // Inscreve no canal garantindo que os eventos foram definidos ANTES da conexão ser finalizada
-      canal = supabase
-        .channel(`notificacoes-${userId}`)
-        .on(
-          'postgres_changes',
-          {
-            event: 'INSERT',
-            schema: 'public',
-            table: 'notifications',
-            filter: `usuario_id=eq.${userId}`
-          },
-          () => {
-            tocarSom()
-            carregarNotificacoes()
-          }
-        )
-
-      // Registra o subscribe de forma limpa
-      await canal.subscribe()
-    }
-
-    inicializarRealtime()
-
-    return () => {
-      if (canal) {
-        supabase.removeChannel(canal)
-      }
-    }
-  }, [])
-
-  async function carregarNotificacoes() {
+  const carregarNotificacoes = useCallback(async () => {
     try {
       const { data: sessao } = await supabase.auth.getSession()
       if (!sessao.session?.user) {
@@ -80,34 +42,30 @@ export default function Notificacoes() {
       }
 
       const meuId = sessao.session.user.id
+      setMeuUserId(meuId)
 
       // 1. Limpa notificações antigas (+7 dias)
       const dataLimite = new Date()
       dataLimite.setDate(dataLimite.getDate() - 7)
-
       await supabase
         .from('notifications')
         .delete()
         .eq('usuario_id', meuId)
         .lt('created_at', dataLimite.toISOString())
 
-      // 2. Busca até 15 recentes
+      // 2. Busca até 20 mais recentes
       const { data, error } = await supabase
         .from('notifications')
         .select('*')
         .eq('usuario_id', meuId)
         .order('created_at', { ascending: false })
-        .limit(15)
+        .limit(20)
 
       if (error) throw error
 
       const listaBase = data ?? []
       const countNaoLidas = listaBase.filter((n) => !n.lida).length
       setNaoLidasCount(countNaoLidas)
-
-      if (countNaoLidas > 0) {
-        tocarSom()
-      }
 
       // 3. Busca fotos dos remetentes
       const remetentesIds = Array.from(new Set(listaBase.map((n) => n.remetente_id).filter(Boolean)))
@@ -132,7 +90,7 @@ export default function Notificacoes() {
 
       setNotificacoes(formatadas)
 
-      // 4. Marca como lidas no banco
+      // 4. Marca como lidas no banco de dados
       if (countNaoLidas > 0) {
         await supabase
           .from('notifications')
@@ -145,7 +103,17 @@ export default function Notificacoes() {
     } finally {
       setCarregando(false)
     }
-  }
+  }, [router])
+
+  useEffect(() => {
+    carregarNotificacoes()
+  }, [carregarNotificacoes])
+
+  // Usando o Hook Isolado para Notificações Realtime
+  useNotificacoesRealtime(meuUserId, () => {
+    tocarSom()
+    carregarNotificacoes()
+  })
 
   function formatarTempo(dataIso: string) {
     const data = new Date(dataIso)
@@ -155,6 +123,14 @@ export default function Notificacoes() {
       hour: '2-digit',
       minute: '2-digit'
     })
+  }
+
+  const obterIconeNotificacao = (tipo?: string) => {
+    if (!tipo) return '🔔'
+    if (tipo.includes('venda') || tipo.includes('pagamento')) return '💰'
+    if (tipo.includes('mensagem') || tipo.includes('chat')) return '💬'
+    if (tipo.includes('seguidor')) return '👤'
+    return '🔔'
   }
 
   if (carregando) {
@@ -167,19 +143,25 @@ export default function Notificacoes() {
 
   return (
     <main style={page}>
-      <header style={topo}>
-        <button style={botaoVoltar} onClick={() => router.push('/feed')}>
-          ←
-        </button>
-        <h1 style={tituloHeader}>Notificações ({naoLidasCount})</h1>
+      <header style={headerVendasBR}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <button style={botaoVoltar} onClick={() => router.back()}>
+            ←
+          </button>
+          <div style={logoBR}>BR</div>
+          <div style={{ display: 'flex', alignItems: 'center', fontSize: 20, fontWeight: '900', color: '#008C3A', letterSpacing: '-0.5px' }}>
+            NOTIFICAÇÕ<span style={{ fontSize: 16, margin: '0 -1px' }}>🍃</span>S {naoLidasCount > 0 && `(${naoLidasCount})`}
+          </div>
+        </div>
       </header>
 
       <section style={container}>
         {notificacoes.length === 0 ? (
           <div style={boxVazio}>
-            <span style={{ fontSize: 48 }}>🔔</span>
-            <p style={{ marginTop: 12, color: '#666' }}>
-              Você não tem nenhuma notificação
+            <span style={{ fontSize: 48 }}>🔕</span>
+            <strong style={{ fontSize: 16, color: '#111', display: 'block', marginTop: 10 }}>Nenhuma notificação por aqui</strong>
+            <p style={{ marginTop: 6, color: '#666', fontSize: 13, lineHeight: '1.4' }}>
+              Avisos sobre vendas, mensagens e atividades da sua conta aparecerão aqui.
             </p>
           </div>
         ) : (
@@ -189,9 +171,10 @@ export default function Notificacoes() {
                 key={item.id}
                 style={{
                   ...cardNotificacao,
-                  background: item.lida ? '#fff' : '#EAF7EC'
+                  background: item.lida ? '#ffffff' : '#f0fdf4',
+                  borderColor: item.lida ? '#e5e7eb' : '#bbf7d0'
                 }}
-                onClick={() => router.push(item.link || '/feed')}
+                onClick={() => router.push(item.link || '/vendas')}
               >
                 <div
                   style={avatar}
@@ -205,12 +188,11 @@ export default function Notificacoes() {
                   {item.remetente?.foto_url ? (
                     <img src={item.remetente.foto_url} alt="" style={fotoAvatar} />
                   ) : (
-                    item.remetente?.nome?.charAt(0).toUpperCase() || '👤'
+                    <span>{obterIconeNotificacao(item.tipo)}</span>
                   )}
                 </div>
-
                 <div style={conteudoTextual}>
-                  <p style={textoMensagem}>{item.mensagem}</p>
+                  <p style={{ ...textoMensagem, fontWeight: item.lida ? '500' : '800' }}>{item.mensagem}</p>
                   <span style={tempo}>{formatarTempo(item.created_at)}</span>
                 </div>
               </div>
@@ -222,18 +204,18 @@ export default function Notificacoes() {
   )
 }
 
-// Estilos inline
-const page = { minHeight: '100vh', background: '#f2f2f2', fontFamily: 'Arial, sans-serif' }
+// ESTILOS INLINE ATUALIZADOS
+const page = { minHeight: '100vh', background: '#f4f5f7', fontFamily: 'Arial, sans-serif', maxWidth: 500, margin: '0 auto' }
 const carregandoBox = { minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#008C3A', fontWeight: 900 }
-const topo = { background: '#008C3A', color: '#fff', padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 12 }
-const botaoVoltar = { background: 'none', border: 'none', color: '#fff', fontSize: 20, cursor: 'pointer', fontWeight: 900 }
-const tituloHeader = { margin: 0, fontSize: 18, fontWeight: 900 }
-const container = { maxWidth: 500, margin: '0 auto', padding: 12 }
-const boxVazio = { background: '#fff', borderRadius: 16, padding: 32, textAlign: 'center' as const, marginTop: 20 }
-const lista = { display: 'flex', flexDirection: 'column' as const, gap: 8 }
-const cardNotificacao = { display: 'flex', alignItems: 'center', gap: 12, padding: 12, borderRadius: 12, cursor: 'pointer', border: '1px solid #e2e8f0' }
-const avatar = { width: 40, height: 40, borderRadius: '50%', background: '#FFD700', color: '#008C3A', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 900, overflow: 'hidden', flexShrink: 0 }
+const headerVendasBR = { padding: '14px 16px', background: '#ffffff', borderBottom: '1px solid #f0f2f5', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }
+const logoBR = { width: 34, height: 34, borderRadius: '50%', background: '#fff', border: '3px solid #008C3A', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#FFD700', fontWeight: '900' as const, fontSize: 14, boxShadow: '0 0 0 1px #FFD700' }
+const botaoVoltar = { background: 'none', border: 'none', color: '#111', fontSize: 24, cursor: 'pointer', fontWeight: 900, paddingRight: 4 }
+const container = { padding: 14 }
+const boxVazio = { background: '#fff', borderRadius: 16, padding: 32, textAlign: 'center' as const, marginTop: 20, border: '1px solid #e5e7eb' }
+const lista = { display: 'flex', flexDirection: 'column' as const, gap: 10 }
+const cardNotificacao = { display: 'flex', alignItems: 'center', gap: 12, padding: 14, borderRadius: 16, cursor: 'pointer', border: '1px solid' }
+const avatar = { width: 44, height: 44, borderRadius: '50%', background: '#e6f4ea', color: '#008C3A', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 900, overflow: 'hidden', flexShrink: 0, fontSize: 20 }
 const fotoAvatar = { width: '100%', height: '100%', objectFit: 'cover' as const }
-const conteudoTextual = { display: 'flex', flexDirection: 'column' as const, gap: 2 }
-const textoMensagem = { margin: 0, fontSize: 14, color: '#111', lineHeight: 1.3 }
-const tempo = { fontSize: 11, color: '#777' }
+const conteudoTextual = { display: 'flex', flexDirection: 'column' as const, gap: 4, flex: 1 }
+const textoMensagem = { margin: 0, fontSize: 13, color: '#111', lineHeight: 1.4 }
+const tempo = { fontSize: 11, color: '#888' }

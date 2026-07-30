@@ -1,9 +1,11 @@
 'use client'
+
 import { useEffect, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { supabase } from '../../utils/supabase/client'
 import { VoiceRecorder } from 'capacitor-voice-recorder'
 import { Capacitor } from '@capacitor/core'
+import { RealtimeChannel } from '@supabase/supabase-js'
 
 type Usuario = {
   id: string
@@ -20,6 +22,9 @@ type Conversa = {
   atualizado_em: string
   outroUsuario?: Usuario | null
   ultimaMensagem?: string
+  tituloAnuncio?: string | null
+  ehVendas?: boolean
+  naoLida?: boolean
 }
 
 type Mensagem = {
@@ -34,130 +39,403 @@ type Mensagem = {
   reacoes?: Record<string, string>
 }
 
+// SERVIDORES STUN (GOOGLE) + TURN (METERED.CA)
+const ICE_SERVERS: RTCConfiguration = {
+  iceServers: [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun3.l.google.com:19302' },
+    {
+      urls: 'turn:global.relay.metered.ca:80',
+      username: 'ff721accd1047958fdc21ebd',
+      credential: 'D0R3KForJtEYr0XC'
+    },
+    {
+      urls: 'turn:global.relay.metered.ca:443',
+      username: 'ff721accd1047958fdc21ebd',
+      credential: 'D0R3KForJtEYr0XC'
+    },
+    {
+      urls: 'turn:global.relay.metered.ca:443?transport=tcp',
+      username: 'ff721accd1047958fdc21ebd',
+      credential: 'D0R3KForJtEYr0XC'
+    }
+  ]
+}
+
+const AUDIO_CONSTRAINTS = {
+  echoCancellation: true,
+  noiseSuppression: true,
+  autoGainControl: true
+}
+
 export default function Mensagens() {
   const router = useRouter()
   const [carregando, setCarregando] = useState(true)
   const [usuarioAtual, setUsuarioAtual] = useState<Usuario | null>(null)
-  const [conversas, setConversas] = useState<Conversa[]>([])
+
+  // ABAS & CONVERSAS
+  const [abaAtiva, setAbaAtiva] = useState<'batepapo' | 'vendas'>('batepapo')
+  const [conversasBatePapo, setConversasBatePapo] = useState<Conversa[]>([])
+  const [conversasVendas, setConversasVendas] = useState<Conversa[]>([])
   const [conversaAberta, setConversaAberta] = useState<Conversa | null>(null)
   const [mensagens, setMensagens] = useState<Mensagem[]>([])
   const [telaConversaAberta, setTelaConversaAberta] = useState(false)
   const areaMensagensRef = useRef<HTMLDivElement | null>(null)
   const [novaMensagem, setNovaMensagem] = useState('')
 
-  // PRESENÇA / STATUS "NA ATIVA"
-  const [outroNaAtiva, setOutroNaAtiva] = useState(false)
-  const [outroVistoUltimaVez, setOutroVistoUltimaVez] = useState<string | null>(null)
+  // MODAL ADICIONAR POR ID
+  const [modalAdicionarIDAberto, setModalAdicionarIDAberto] = useState(false)
+  const [idParaAdicionar, setIdParaAdicionar] = useState('')
+  const [sugestoesPerfis, setSugestoesPerfis] = useState<Usuario[]>([])
+  const [buscandoID, setBuscandoID] = useState(false)
 
-  // REFS E PREVIEW DE MÍDIA ANTES DE ENVIAR
-  const inputMidiaRef = useRef<HTMLInputElement | null>(null)
-  const inputDocumentoRef = useRef<HTMLInputElement | null>(null)
-  const [menuAnexosAberto, setMenuAnexosAberto] = useState(false)
-  
-  const [midiaPendente, setMidiaPendente] = useState<{
-    file: File
-    urlPreview: string
-    tipo: 'imagem' | 'video'
+  // WEBRTC & SINALIZAÇÃO
+  const localStreamRef = useRef<MediaStream | null>(null)
+  const remoteStreamRef = useRef<MediaStream | null>(null)
+  const peerConnectionRef = useRef<RTCPeerConnection | null>(null)
+  const canalSalaRef = useRef<RealtimeChannel | null>(null)
+
+  const videoLocalRef = useRef<HTMLVideoElement | null>(null)
+  const videoRemotoRef = useRef<HTMLVideoElement | null>(null)
+  const audioRemotoRef = useRef<HTMLAudioElement | null>(null)
+
+  const [modoCamera, setModoCamera] = useState<'user' | 'environment'>('user')
+  const [inverterTelas, setInverterTelas] = useState(false)
+
+  // AUDIO CONTEXT
+  const audioCtxRef = useRef<AudioContext | null>(null)
+  const ringtoneIntervalRef = useRef<NodeJS.Timeout | null>(null)
+
+  // ESTADO DA CHAMADA
+  const [emChamada, setEmChamada] = useState<{
+    tipo: 'audio' | 'video'
+    status: 'chamando' | 'conectado'
+    microfoneMutado: boolean
+    videoAtivo: boolean
   } | null>(null)
-  const [legendaMidia, setLegendaMidia] = useState('')
-  const [progressoUpload, setProgressoUpload] = useState<number | null>(null)
 
-  const [midiaExpandida, setMidiaExpandida] = useState<string | null>(null)
-  const [mensagemParaReagir, setMensagemParaReagir] = useState<string | null>(null)
+  const [chamadaRecebida, setChamadaRecebida] = useState<{
+    remetente: Usuario
+    tipo: 'audio' | 'video'
+    conversaId: string
+  } | null>(null)
 
-  // ESTADOS DO MICROFONE
-  const [gravandoAudio, setGravandoAudio] = useState(false)
-  const [tempoGravacao, setTempoGravacao] = useState(0)
-  const timerRef = useRef<NodeJS.Timeout | null>(null)
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null)
-  const chunksRef = useRef<Blob[]>([])
-  const cancelarGravacaoRef = useRef(false)
+  const [tempoChamada, setTempoChamada] = useState(0)
+  const timerChamadaRef = useRef<NodeJS.Timeout | null>(null)
 
   const [enviando, setEnviando] = useState(false)
-  const [menuConversaAberto, setMenuConversaAberto] = useState<string | null>(null)
 
   useEffect(() => {
     iniciarMensagens()
+    return () => {
+      encerrarChamadaLocal()
+    }
   }, [])
 
-  // CANAL DE MENSAGENS E PRESENÇA
+  // REGISTRAR NOTIFICAÇÃO NATIVA (FCM) DINÂMICAMENTE
+  async function registrarPushNotifications(meuId: string) {
+    if (!Capacitor.isNativePlatform()) return
+
+    try {
+      const { PushNotifications } = await import('@capacitor/push-notifications')
+
+      let permStatus = await PushNotifications.checkPermissions()
+      if (permStatus.receive === 'prompt') {
+        permStatus = await PushNotifications.requestPermissions()
+      }
+
+      if (permStatus.receive === 'granted') {
+        await PushNotifications.register()
+      }
+
+      PushNotifications.addListener('registration', async (token) => {
+        if (token.value && meuId) {
+          await supabase
+            .from('profiles')
+            .update({ fcm_token: token.value })
+            .eq('id', meuId)
+        }
+      })
+    } catch (e) {}
+  }
+
+  // BUSCA SUGESTÕES AO VIVO
   useEffect(() => {
-    if (!conversaAberta?.id || !usuarioAtual?.id) return
-    carregarMensagens(conversaAberta.id)
+    const termo = idParaAdicionar.trim().replace('@', '')
+    if (termo.length < 2) {
+      setSugestoesPerfis([])
+      return
+    }
 
-    setOutroNaAtiva(false)
-    const outroUsuarioId = conversaAberta.outroUsuario?.id
+    const timer = setTimeout(async () => {
+      try {
+        const ehUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(termo)
+        let query = supabase.from('profiles').select('id, nome, username, foto_url')
 
-    const canalMensagens = supabase
-      .channel(`chat-presenca-${conversaAberta.id}`, {
-        config: {
-          presence: { key: usuarioAtual.id }
-        }
-      })
-      .on(
-        'postgres_changes',
-        {
-          event: '*',
-          schema: 'public',
-          table: 'mensagens',
-          filter: `conversa_id=eq.${conversaAberta.id}`
-        },
-        (payload) => {
-          if (payload.eventType === 'INSERT') {
-            const novaMensagem = payload.new as Mensagem
-            setMensagens((mensagensAtuais) => {
-              if (mensagensAtuais.find((m) => m.id === novaMensagem.id)) return mensagensAtuais
-              return [...mensagensAtuais, novaMensagem]
-            })
-
-            if (usuarioAtual?.id && novaMensagem.destinatario_id === usuarioAtual.id) {
-              const somDeNotificacao = new Audio('/mensagem.mp3')
-              somDeNotificacao.play().catch((erro) => console.log('Som bloqueado', erro))
-              supabase
-                .from('mensagens')
-                .update({ lida: true })
-                .eq('id', novaMensagem.id)
-                .then()
-            }
-          } else if (payload.eventType === 'UPDATE') {
-            const mensagemAtualizada = payload.new as Mensagem
-            setMensagens((atuais) =>
-              atuais.map((m) => (m.id === mensagemAtualizada.id ? mensagemAtualizada : m))
-            )
-          }
-        }
-      )
-      .on('presence', { event: 'sync' }, () => {
-        const estadoPresenca = canalMensagens.presenceState()
-        if (outroUsuarioId && estadoPresenca[outroUsuarioId]) {
-          setOutroNaAtiva(true)
-          const infoOutro = estadoPresenca[outroUsuarioId][0] as any
-          if (infoOutro?.online_at) {
-            const horaFormatada = new Date(infoOutro.online_at).toLocaleTimeString('pt-BR', {
-              hour: '2-digit',
-              minute: '2-digit'
-            })
-            setOutroVistoUltimaVez(horaFormatada)
-          }
+        if (ehUUID) {
+          query = query.or(`username.ilike.%${termo}%,id.eq.${termo}`)
         } else {
-          setOutroNaAtiva(false)
+          query = query.or(`username.ilike.%${termo}%,nome.ilike.%${termo}%`)
         }
-      })
-      .subscribe(async (status) => {
-        if (status === 'SUBSCRIBED') {
-          await canalMensagens.track({ online_at: new Date().toISOString() })
+
+        const { data } = await query.limit(5)
+        if (data) {
+          setSugestoesPerfis(data.filter((u) => u.id !== usuarioAtual?.id))
         }
+      } catch (e) {}
+    }, 250)
+
+    return () => clearTimeout(timer)
+  }, [idParaAdicionar, usuarioAtual?.id])
+
+  // ESCUTA GLOBAL DE CHAMADAS
+  useEffect(() => {
+    if (!usuarioAtual?.id) return
+
+    const canalPessoal = supabase
+      .channel(`chamadas-pessoal-${usuarioAtual.id}`)
+      .on('broadcast', { event: 'solicitar_chamada' }, (payload) => {
+        const { remetente, tipo, conversaId } = payload.payload
+        setChamadaRecebida({ remetente, tipo, conversaId })
+        tocarSomRecebendo()
       })
+      .subscribe()
 
     return () => {
-      supabase.removeChannel(canalMensagens)
+      supabase.removeChannel(canalPessoal)
     }
-  }, [conversaAberta?.id, usuarioAtual?.id])
+  }, [usuarioAtual?.id])
+
+  async function conectarSalaSinalizacao(salaId: string) {
+    if (canalSalaRef.current) {
+      await supabase.removeChannel(canalSalaRef.current)
+      canalSalaRef.current = null
+    }
+
+    const canal = supabase.channel(`sala-chamada-${salaId}`)
+
+    canal
+      .on('broadcast', { event: 'resposta_chamada' }, async (payload) => {
+        const { aceito } = payload.payload
+        pararSom()
+        if (aceito) {
+          setEmChamada((prev) => (prev ? { ...prev, status: 'conectado' } : null))
+          iniciarWebRTCOffer()
+        } else {
+          alert('O contato recusou a chamada.')
+          await encerrarChamadaLocal()
+        }
+      })
+      .on('broadcast', { event: 'webrtc_offer' }, async (payload) => {
+        const { offer } = payload.payload
+        setEmChamada((prev) => (prev ? { ...prev, status: 'conectado' } : null))
+        handleWebRTCOffer(offer)
+      })
+      .on('broadcast', { event: 'webrtc_answer' }, async (payload) => {
+        const { answer } = payload.payload
+        setEmChamada((prev) => (prev ? { ...prev, status: 'conectado' } : null))
+        handleWebRTCAnswer(answer)
+      })
+      .on('broadcast', { event: 'webrtc_candidate' }, async (payload) => {
+        const { candidate } = payload.payload
+        handleWebRTCCandidate(candidate)
+      })
+      .on('broadcast', { event: 'encerrar_chamada' }, async () => {
+        await encerrarChamadaLocal()
+      })
+      .subscribe()
+
+    canalSalaRef.current = canal
+  }
+
+  function enviarSinalNaSala(event: string, payload: any) {
+    if (canalSalaRef.current) {
+      canalSalaRef.current.send({ type: 'broadcast', event, payload })
+    }
+  }
+
+  function criarPeerConnection() {
+    if (peerConnectionRef.current) return peerConnectionRef.current
+
+    const pc = new RTCPeerConnection(ICE_SERVERS)
+
+    if (localStreamRef.current) {
+      localStreamRef.current.getTracks().forEach((track) => {
+        pc.addTrack(track, localStreamRef.current!)
+      })
+    }
+
+    pc.ontrack = (e) => {
+      if (!remoteStreamRef.current) {
+        remoteStreamRef.current = new MediaStream()
+      }
+      e.streams[0].getTracks().forEach((track) => {
+        remoteStreamRef.current?.addTrack(track)
+      })
+
+      conectarStreamRemotoNoVideo()
+    }
+
+    pc.onicecandidate = (e) => {
+      if (e.candidate) {
+        enviarSinalNaSala('webrtc_candidate', { candidate: e.candidate })
+      }
+    }
+
+    peerConnectionRef.current = pc
+    return pc
+  }
+
+  function conectarStreamRemotoNoVideo() {
+    if (videoRemotoRef.current && remoteStreamRef.current) {
+      videoRemotoRef.current.srcObject = remoteStreamRef.current
+      videoRemotoRef.current.play().catch(() => {})
+    }
+    if (audioRemotoRef.current && remoteStreamRef.current) {
+      audioRemotoRef.current.srcObject = remoteStreamRef.current
+      audioRemotoRef.current.play().catch(() => {})
+    }
+  }
+
+  async function iniciarWebRTCOffer() {
+    const pc = criarPeerConnection()
+    const offer = await pc.createOffer()
+    await pc.setLocalDescription(offer)
+    enviarSinalNaSala('webrtc_offer', { offer })
+  }
+
+  async function handleWebRTCOffer(offer: RTCSessionDescriptionInit) {
+    const pc = criarPeerConnection()
+    await pc.setRemoteDescription(new RTCSessionDescription(offer))
+    const answer = await pc.createAnswer()
+    await pc.setLocalDescription(answer)
+    enviarSinalNaSala('webrtc_answer', { answer })
+  }
+
+  async function handleWebRTCAnswer(answer: RTCSessionDescriptionInit) {
+    if (peerConnectionRef.current) {
+      await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(answer))
+    }
+  }
+
+  async function handleWebRTCCandidate(candidate: RTCIceCandidateInit) {
+    if (peerConnectionRef.current) {
+      try {
+        await peerConnectionRef.current.addIceCandidate(new RTCIceCandidate(candidate))
+      } catch (e) {}
+    }
+  }
+
+  const iniciarAudioContext = () => {
+    try {
+      if (!audioCtxRef.current) {
+        const AudioCtx = window.AudioContext || (window as any).webkitAudioContext
+        if (AudioCtx) audioCtxRef.current = new AudioCtx()
+      }
+      if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
+        audioCtxRef.current.resume()
+      }
+    } catch (e) {}
+  }
+
+  function tocarSomChamando() {
+    try {
+      pararSom()
+      iniciarAudioContext()
+      const ctx = audioCtxRef.current
+      if (!ctx) return
+
+      const tocarTu = () => {
+        if (!ctx || ctx.state === 'closed') return
+        try {
+          const osc = ctx.createOscillator()
+          const gain = ctx.createGain()
+          osc.type = 'sine'
+          osc.frequency.setValueAtTime(440, ctx.currentTime)
+          gain.gain.setValueAtTime(0.15, ctx.currentTime)
+          gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 1.2)
+          osc.connect(gain)
+          gain.connect(ctx.destination)
+          osc.start()
+          osc.stop(ctx.currentTime + 1.2)
+        } catch (e) {}
+      }
+
+      tocarTu()
+      ringtoneIntervalRef.current = setInterval(tocarTu, 3000)
+    } catch (e) {}
+  }
+
+  function tocarSomRecebendo() {
+    try {
+      pararSom()
+      iniciarAudioContext()
+      const ctx = audioCtxRef.current
+      if (!ctx) return
+
+      const tocarTrim = () => {
+        if (!ctx || ctx.state === 'closed') return
+        try {
+          const osc = ctx.createOscillator()
+          const gain = ctx.createGain()
+          osc.type = 'triangle'
+          osc.frequency.setValueAtTime(800, ctx.currentTime)
+          gain.gain.setValueAtTime(0.2, ctx.currentTime)
+          gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.8)
+          osc.connect(gain)
+          gain.connect(ctx.destination)
+          osc.start()
+          osc.stop(ctx.currentTime + 0.8)
+        } catch (e) {}
+      }
+
+      tocarTrim()
+      ringtoneIntervalRef.current = setInterval(tocarTrim, 1500)
+    } catch (e) {}
+  }
+
+  function pararSom() {
+    if (ringtoneIntervalRef.current) {
+      clearInterval(ringtoneIntervalRef.current)
+      ringtoneIntervalRef.current = null
+    }
+  }
 
   useEffect(() => {
-    if (!areaMensagensRef.current) return
-    areaMensagensRef.current.scrollTop = areaMensagensRef.current.scrollHeight
-  }, [mensagens.length])
+    if (emChamada?.status === 'chamando') {
+      tocarSomChamando()
+    } else {
+      pararSom()
+    }
+
+    if (emChamada?.status === 'conectado') {
+      timerChamadaRef.current = setInterval(() => {
+        setTempoChamada((prev) => prev + 1)
+      }, 1000)
+    } else {
+      if (timerChamadaRef.current) clearInterval(timerChamadaRef.current)
+      setTempoChamada(0)
+    }
+
+    return () => {
+      if (timerChamadaRef.current) clearInterval(timerChamadaRef.current)
+    }
+  }, [emChamada?.status])
+
+  useEffect(() => {
+    if (videoLocalRef.current && localStreamRef.current) {
+      videoLocalRef.current.srcObject = localStreamRef.current
+      videoLocalRef.current.play().catch(() => {})
+    }
+  }, [emChamada?.tipo, emChamada?.status, inverterTelas])
+
+  useEffect(() => {
+    if (emChamada?.status === 'conectado') {
+      conectarStreamRemotoNoVideo()
+    }
+  }, [emChamada?.status])
 
   async function iniciarMensagens() {
     const { data: sessao } = await supabase.auth.getSession()
@@ -165,6 +443,7 @@ export default function Mensagens() {
       router.replace('/login')
       return
     }
+
     const authUserId = sessao.session.user.id
     let { data: usuario } = await supabase
       .from('profiles')
@@ -182,137 +461,103 @@ export default function Mensagens() {
     }
 
     if (!usuario) {
-      alert('Perfil não encontrado no sistema.')
+      alert('Perfil não encontrado.')
       router.replace('/feed')
       return
     }
 
     setUsuarioAtual(usuario)
+    await registrarPushNotifications(usuario.id)
+
     const parametros = new URLSearchParams(window.location.search)
     const usuarioDestinoId = parametros.get('para') || parametros.get('id')
+
     if (usuarioDestinoId && usuarioDestinoId !== usuario.id) {
       await abrirOuCriarConversa(usuario.id, usuarioDestinoId)
       setTelaConversaAberta(true)
     }
+
     await carregarConversas(usuario.id)
     setCarregando(false)
   }
 
   async function carregarConversas(meuId: string) {
-    const { data, error } = await supabase
+    const { data: convData } = await supabase
       .from('conversas')
       .select('*')
       .or(`usuario_1.eq.${meuId},usuario_2.eq.${meuId}`)
       .order('criado_em', { ascending: false })
 
-    if (error) return
-
-    const conversasBase = data ?? []
-    const idsOutrosUsuarios = conversasBase.map((conversa) =>
-      conversa.usuario_1 === meuId ? conversa.usuario_2 : conversa.usuario_1
-    )
-
+    const conversasBase = convData ?? []
+    const idsOutros = conversasBase.map((c) => (c.usuario_1 === meuId ? c.usuario_2 : c.usuario_1))
     let usuariosMapa: Record<string, Usuario> = {}
-    if (idsOutrosUsuarios.length > 0) {
-      const { data: usuarios } = await supabase
-        .from('profiles')
-        .select('id, nome, username, foto_url')
-        .in('id', idsOutrosUsuarios)
-      usuariosMapa = (usuarios ?? []).reduce((mapa: Record<string, Usuario>, usuario) => {
-        mapa[usuario.id] = usuario
+
+    if (idsOutros.length > 0) {
+      const { data: perfis } = await supabase.from('profiles').select('id, nome, username, foto_url').in('id', idsOutros)
+      usuariosMapa = (perfis ?? []).reduce((mapa: Record<string, Usuario>, u) => {
+        mapa[u.id] = u
         return mapa
       }, {})
     }
 
-    const conversasComUsuarios = await Promise.all(
-      conversasBase.map(async (conversa) => {
-        const outroId = conversa.usuario_1 === meuId ? conversa.usuario_2 : conversa.usuario_1
+    const conversasMontadas = await Promise.all(
+      conversasBase.map(async (c) => {
+        const outroId = c.usuario_1 === meuId ? c.usuario_2 : c.usuario_1
         const { data: ultima } = await supabase
           .from('mensagens')
-          .select('texto')
-          .eq('conversa_id', conversa.id)
+          .select('texto, lida, destinatario_id')
+          .eq('conversa_id', c.id)
           .order('criado_em', { ascending: false })
           .limit(1)
           .maybeSingle()
+
         return {
-          ...conversa,
+          ...c,
           outroUsuario: usuariosMapa[outroId] ?? null,
-          ultimaMensagem: ultima?.texto ?? 'Conversa iniciada'
+          ultimaMensagem: ultima?.texto ?? 'Conversa iniciada',
+          naoLida: !ultima?.lida && ultima?.destinatario_id === meuId,
+          ehVendas: false
         }
       })
     )
-    setConversas(conversasComUsuarios)
+    setConversasBatePapo(conversasMontadas)
   }
 
   async function abrirOuCriarConversa(meuId: string, outroUsuarioId: string) {
-    const { data: conv1 } = await supabase
-      .from('conversas')
-      .select('*')
-      .eq('usuario_1', meuId)
-      .eq('usuario_2', outroUsuarioId)
-      .maybeSingle()
-
+    const { data: conv1 } = await supabase.from('conversas').select('*').eq('usuario_1', meuId).eq('usuario_2', outroUsuarioId).maybeSingle()
     let conversaExistente = conv1
+
     if (!conversaExistente) {
-      const { data: conv2 } = await supabase
-        .from('conversas')
-        .select('*')
-        .eq('usuario_1', outroUsuarioId)
-        .eq('usuario_2', meuId)
-        .maybeSingle()
+      const { data: conv2 } = await supabase.from('conversas').select('*').eq('usuario_1', outroUsuarioId).eq('usuario_2', meuId).maybeSingle()
       conversaExistente = conv2
     }
 
     if (conversaExistente) {
-      const conversaComUsuario = await montarConversaComUsuario(conversaExistente, meuId)
-      setConversaAberta(conversaComUsuario)
-      return conversaComUsuario
+      const montada = await montarConversaComUsuario(conversaExistente, meuId)
+      setConversaAberta(montada)
+      return montada
     }
 
-    const { data: novaConversa, error } = await supabase
-      .from('conversas')
-      .insert({ usuario_1: meuId, usuario_2: outroUsuarioId })
-      .select()
-      .single()
+    const { data: nova, error } = await supabase.from('conversas').insert({ usuario_1: meuId, usuario_2: outroUsuarioId }).select().single()
+    if (error || !nova) return null
 
-    if (error || !novaConversa) return null
-
-    const conversaComUsuario = await montarConversaComUsuario(novaConversa, meuId)
-    setConversaAberta(conversaComUsuario)
-    return conversaComUsuario
+    const montada = await montarConversaComUsuario(nova, meuId)
+    setConversaAberta(montada)
+    return montada
   }
 
   async function montarConversaComUsuario(conversa: Conversa, meuId: string) {
     const outroId = conversa.usuario_1 === meuId ? conversa.usuario_2 : conversa.usuario_1
-    const { data: outroUsuario } = await supabase
-      .from('profiles')
-      .select('id, nome, username, foto_url')
-      .eq('id', outroId)
-      .single()
-    return {
-      ...conversa,
-      outroUsuario: outroUsuario ?? null,
-      ultimaMensagem: 'Conversa iniciada'
-    }
+    const { data: outro } = await supabase.from('profiles').select('id, nome, username, foto_url').eq('id', outroId).single()
+    return { ...conversa, outroUsuario: outro ?? null, ultimaMensagem: 'Conversa iniciada' }
   }
 
   async function carregarMensagens(conversaId: string) {
-    const { data, error } = await supabase
-      .from('mensagens')
-      .select('*')
-      .eq('conversa_id', conversaId)
-      .order('criado_em', { ascending: true })
-
+    const { data, error } = await supabase.from('mensagens').select('*').eq('conversa_id', conversaId).order('criado_em', { ascending: true })
     if (error) return
     setMensagens(data ?? [])
-
     if (usuarioAtual?.id) {
-      await supabase
-        .from('mensagens')
-        .update({ lida: true })
-        .eq('conversa_id', conversaId)
-        .eq('destinatario_id', usuarioAtual.id)
-        .eq('lida', false)
+      await supabase.from('mensagens').update({ lida: true }).eq('conversa_id', conversaId).eq('destinatario_id', usuarioAtual.id).eq('lida', false)
     }
   }
 
@@ -320,12 +565,10 @@ export default function Mensagens() {
     if (!usuarioAtual || !conversaAberta) return
     const texto = novaMensagem.trim()
     if (!texto) return
-    const destinatarioId =
-      conversaAberta.usuario_1 === usuarioAtual.id
-        ? conversaAberta.usuario_2
-        : conversaAberta.usuario_1
 
+    const destinatarioId = conversaAberta.usuario_1 === usuarioAtual.id ? conversaAberta.usuario_2 : conversaAberta.usuario_1
     setEnviando(true)
+
     const { error } = await supabase.from('mensagens').insert({
       conversa_id: conversaAberta.id,
       remetente_id: usuarioAtual.id,
@@ -334,271 +577,297 @@ export default function Mensagens() {
       lida: false
     })
 
-    if (error) {
-      alert('Erro ao enviar mensagem: ' + error.message)
-      setEnviando(false)
-      return
+    if (!error) {
+      setNovaMensagem('')
+      await carregarMensagens(conversaAberta.id)
     }
-
-    setNovaMensagem('')
-    await carregarMensagens(conversaAberta.id)
-    await carregarConversas(usuarioAtual.id)
     setEnviando(false)
   }
 
-  function abrirGaleria(e: React.MouseEvent) {
-    e.stopPropagation()
-    setMenuAnexosAberto(false)
-    inputMidiaRef.current?.click()
-  }
+  async function adicionarContatoPorID(perfilDireto?: Usuario) {
+    let perfilParaAdicionar = perfilDireto
 
-  function abrirDocumentos(e: React.MouseEvent) {
-    e.stopPropagation()
-    setMenuAnexosAberto(false)
-    inputDocumentoRef.current?.click()
-  }
+    if (!perfilParaAdicionar) {
+      const termo = idParaAdicionar.trim().replace('@', '')
+      if (!termo) return alert('Digite o ID ou @username do seu amigo.')
 
-  function enviarLink(e: React.MouseEvent) {
-    e.stopPropagation()
-    setMenuAnexosAberto(false)
-    const url = prompt('Cole ou digite o link para enviar:')
-    if (!url || !url.trim()) return
+      setBuscandoID(true)
+      try {
+        const ehUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(termo)
+        let consulta = supabase.from('profiles').select('id, nome, username, foto_url')
 
-    let linkFormatado = url.trim()
-    if (!linkFormatado.startsWith('http://') && !linkFormatado.startsWith('https://')) {
-      linkFormatado = 'https://' + linkFormatado
-    }
-
-    setNovaMensagem(linkFormatado)
-  }
-
-  function selecionarMidiaParaPreview(evento: React.ChangeEvent<HTMLInputElement>) {
-    const file = evento.target.files?.[0]
-    if (!file) return
-
-    const isVideo = file.type.startsWith('video/')
-    const urlPreview = URL.createObjectURL(file)
-
-    setMidiaPendente({
-      file,
-      urlPreview,
-      tipo: isVideo ? 'video' : 'imagem'
-    })
-    setLegendaMidia('')
-    setProgressoUpload(null)
-  }
-
-  async function confirmarEnvioMidia() {
-    if (!midiaPendente || !usuarioAtual || !conversaAberta) return
-
-    setProgressoUpload(10)
-    const file = midiaPendente.file
-    const extensao = file.name.split('.').pop()
-    const nomeArquivo = `${Date.now()}-${Math.random().toString(36).substring(2)}.${extensao}`
-    const caminho = `${conversaAberta.id}/${nomeArquivo}`
-
-    const interval = setInterval(() => {
-      setProgressoUpload((p) => (p && p < 90 ? p + 15 : p))
-    }, 200)
-
-    const { error: uploadError } = await supabase.storage.from('chat_midia').upload(caminho, file)
-    clearInterval(interval)
-
-    if (uploadError) {
-      alert('Erro ao enviar mídia: ' + uploadError.message)
-      setProgressoUpload(null)
-      return
-    }
-
-    setProgressoUpload(100)
-    const { data: publicUrlData } = supabase.storage.from('chat_midia').getPublicUrl(caminho)
-    const urlMidia = publicUrlData.publicUrl
-    const destinatarioId = conversaAberta.usuario_1 === usuarioAtual.id ? conversaAberta.usuario_2 : conversaAberta.usuario_1
-
-    await supabase.from('mensagens').insert({
-      conversa_id: conversaAberta.id,
-      remetente_id: usuarioAtual.id,
-      destinatario_id: destinatarioId,
-      texto: legendaMidia.trim() || (midiaPendente.tipo === 'video' ? '📹 Vídeo' : '📸 Foto'),
-      arquivo_url: urlMidia,
-      lida: false
-    })
-
-    setMidiaPendente(null)
-    setLegendaMidia('')
-    setProgressoUpload(null)
-    await carregarMensagens(conversaAberta.id)
-  }
-
-  async function enviarDocumento(evento: React.ChangeEvent<HTMLInputElement>) {
-    const arquivo = evento.target.files?.[0]
-    if (!arquivo || !usuarioAtual || !conversaAberta) return
-
-    const nomeOriginal = arquivo.name
-    const extensao = nomeOriginal.split('.').pop()
-    const nomeArquivo = `doc-${Date.now()}.${extensao}`
-    const caminho = `${conversaAberta.id}/${nomeArquivo}`
-
-    const { error: uploadError } = await supabase.storage.from('chat_midia').upload(caminho, arquivo)
-    if (uploadError) {
-      alert('Erro ao enviar arquivo: ' + uploadError.message)
-      return
-    }
-
-    const { data: publicUrlData } = supabase.storage.from('chat_midia').getPublicUrl(caminho)
-    const urlDoc = publicUrlData.publicUrl
-    const destinatarioId = conversaAberta.usuario_1 === usuarioAtual.id ? conversaAberta.usuario_2 : conversaAberta.usuario_1
-
-    await supabase.from('mensagens').insert({
-      conversa_id: conversaAberta.id,
-      remetente_id: usuarioAtual.id,
-      destinatario_id: destinatarioId,
-      texto: `📄 Documento: ${nomeOriginal}`,
-      arquivo_url: urlDoc,
-      lida: false
-    })
-  }
-
-  async function reagirMensagem(mensagemId: string, emoji: string) {
-    if (!usuarioAtual) return
-    const msg = mensagens.find((m) => m.id === mensagemId)
-    if (!msg) return
-
-    const reacoesAtuais = msg.reacoes || {}
-    const reacaoExistente = reacoesAtuais[usuarioAtual.id]
-
-    if (reacaoExistente === emoji) {
-      delete reacoesAtuais[usuarioAtual.id]
-    } else {
-      reacoesAtuais[usuarioAtual.id] = emoji
-    }
-
-    await supabase
-      .from('mensagens')
-      .update({ reacoes: reacoesAtuais })
-      .eq('id', mensagemId)
-
-    setMensagemParaReagir(null)
-  }
-
-  async function iniciarGravacao() {
-    try {
-      if (Capacitor.isNativePlatform()) {
-        const status = await VoiceRecorder.hasAudioRecordingPermission()
-        if (!status.value) {
-          const permissao = await VoiceRecorder.requestAudioRecordingPermission()
-          if (!permissao.value) {
-            alert('O BRAZILZÃO precisa do microfone para gravar mensagens de áudio.')
-            return
-          }
+        if (ehUUID) {
+          consulta = consulta.or(`username.ilike.${termo},id.eq.${termo}`)
+        } else {
+          consulta = consulta.ilike('username', termo)
         }
-      }
 
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-      const mediaRecorder = new MediaRecorder(stream)
-      mediaRecorderRef.current = mediaRecorder
-      chunksRef.current = []
-      cancelarGravacaoRef.current = false
-
-      mediaRecorder.ondataavailable = (e) => {
-        if (e.data.size > 0) chunksRef.current.push(e.data)
-      }
-
-      mediaRecorder.onstop = async () => {
-        stream.getTracks().forEach((track) => track.stop())
-        if (cancelarGravacaoRef.current) {
-          chunksRef.current = []
+        const { data: perfilEncontrado, error } = await consulta.maybeSingle()
+        if (error || !perfilEncontrado) {
+          alert('Nenhum usuário encontrado com esse @username ou ID.')
+          setBuscandoID(false)
           return
         }
-        const audioBlob = new Blob(chunksRef.current, { type: 'audio/webm' })
-        await enviarAudioBlob(audioBlob)
+        perfilParaAdicionar = perfilEncontrado
+      } catch (e) {
+        alert('Erro ao buscar ID.')
+        setBuscandoID(false)
+        return
       }
-
-      mediaRecorder.start()
-      setGravandoAudio(true)
-      setTempoGravacao(0)
-
-      if (timerRef.current) clearInterval(timerRef.current)
-      timerRef.current = setInterval(() => {
-        setTempoGravacao((prev) => prev + 1)
-      }, 1000)
-    } catch (err) {
-      alert('Não foi possível acessar o microfone.')
-      console.log(err)
     }
-  }
 
-  function finalizarEEnviarGravacao() {
-    cancelarGravacaoRef.current = false
-    if (mediaRecorderRef.current && gravandoAudio) {
-      mediaRecorderRef.current.stop()
-      setGravandoAudio(false)
-      if (timerRef.current) clearInterval(timerRef.current)
-    }
-  }
-
-  function cancelarEApagarGravacao() {
-    cancelarGravacaoRef.current = true
-    if (mediaRecorderRef.current && gravandoAudio) {
-      mediaRecorderRef.current.stop()
-      setGravandoAudio(false)
-      if (timerRef.current) clearInterval(timerRef.current)
-    }
-  }
-
-  function formatarTempoGravacao(segundos: number) {
-    const min = Math.floor(segundos / 60)
-    const seg = segundos % 60
-    const minFormatado = min < 10 ? `0${min}` : `${min}`
-    const segFormatado = seg < 10 ? `0${seg}` : `${seg}`
-    return `${minFormatado}:${segFormatado}`
-  }
-
-  async function enviarAudioBlob(audioBlob: Blob) {
-    if (!usuarioAtual || !conversaAberta) return
-    const nomeArquivo = `audio-${Date.now()}-${Math.random().toString(36).substring(2)}.webm`
-    const caminho = `${conversaAberta.id}/${nomeArquivo}`
-
-    const { error: uploadError } = await supabase.storage.from('chat_midia').upload(caminho, audioBlob)
-    if (uploadError) {
-      alert('Erro ao enviar áudio: ' + uploadError.message)
+    if (perfilParaAdicionar.id === usuarioAtual?.id) {
+      alert('Você não pode adicionar seu próprio ID.')
+      setBuscandoID(false)
       return
     }
 
-    const { data: publicUrlData } = supabase.storage.from('chat_midia').getPublicUrl(caminho)
-    const destinatarioId = conversaAberta.usuario_1 === usuarioAtual.id ? conversaAberta.usuario_2 : conversaAberta.usuario_1
-
-    await supabase.from('mensagens').insert({
-      conversa_id: conversaAberta.id,
-      remetente_id: usuarioAtual.id,
-      destinatario_id: destinatarioId,
-      texto: '🎤 Mensagem de voz',
-      arquivo_url: publicUrlData.publicUrl,
-      lida: false
-    })
-  }
-
-  async function apagarConversa(conversaId: string) {
-    const confirmar = window.confirm('Tem certeza que deseja apagar essa conversa?')
-    if (!confirmar) return
-
-    const { error } = await supabase.from('conversas').delete().eq('id', conversaId)
-    if (error) return
-
-    setConversas((atuais) => atuais.filter((conversa) => conversa.id !== conversaId))
-    if (conversaAberta?.id === conversaId) {
-      setConversaAberta(null)
-      setTelaConversaAberta(false)
-      setMensagens([])
+    try {
+      await abrirOuCriarConversa(usuarioAtual!.id, perfilParaAdicionar.id)
+      await carregarConversas(usuarioAtual!.id)
+      setModalAdicionarIDAberto(false)
+      setIdParaAdicionar('')
+      setSugestoesPerfis([])
+      setTelaConversaAberta(true)
+      alert(`Contato @${perfilParaAdicionar.username || perfilParaAdicionar.nome} autorizado com sucesso!`)
+    } catch (e) {
+      alert('Erro ao autorizar contato.')
+    } finally {
+      setBuscandoID(false)
     }
-    setMenuConversaAberto(null)
   }
 
-  function formatarHora(data: string) {
-    return new Date(data).toLocaleTimeString('pt-BR', {
-      hour: '2-digit',
-      minute: '2-digit'
-    })
+  async function iniciarChamada(tipo: 'audio' | 'video') {
+    if (!conversaAberta || !conversaAberta.outroUsuario?.id || !usuarioAtual) return
+    const destinatario = conversaAberta.outroUsuario
+
+    await encerrarChamadaLocal()
+
+    try {
+      iniciarAudioContext()
+
+      if (Capacitor.isNativePlatform()) {
+        try { await VoiceRecorder.requestAudioRecordingPermission() } catch (pErr) {}
+        if (tipo === 'video') {
+          try {
+            const { Camera } = await import('@capacitor/camera')
+            await Camera.requestPermissions({ permissions: ['camera'] })
+          } catch (cErr) {}
+        }
+      }
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: AUDIO_CONSTRAINTS,
+        video: tipo === 'video' ? { facingMode: modoCamera } : false
+      })
+
+      localStreamRef.current = stream
+      setEmChamada({
+        tipo,
+        status: 'chamando',
+        microfoneMutado: false,
+        videoAtivo: tipo === 'video'
+      })
+
+      await conectarSalaSinalizacao(conversaAberta.id)
+
+      // 1. Sinalização Broadcast em Tempo Real
+      const canalNotif = supabase.channel(`chamadas-pessoal-${destinatario.id}`)
+      canalNotif.subscribe((status) => {
+        if (status === 'SUBSCRIBED') {
+          canalNotif.send({
+            type: 'broadcast',
+            event: 'solicitar_chamada',
+            payload: { remetente: usuarioAtual, tipo, conversaId: conversaAberta.id }
+          })
+        }
+      })
+
+      // 2. Gravando notificação interna
+      await supabase.from('notifications').insert({
+        usuario_id: destinatario.id,
+        remetente_id: usuarioAtual.id,
+        tipo: 'chamada_recebida',
+        mensagem: `🔑 @${usuarioAtual.username || usuarioAtual.nome} está te ligando no Papo BR...`,
+        link: `/mensagens?para=${usuarioAtual.id}`,
+        lida: false
+      })
+
+      // 3. Disparo de Push para o Firebase
+      const { data: perfilDestino } = await supabase
+        .from('profiles')
+        .select('fcm_token')
+        .eq('id', destinatario.id)
+        .maybeSingle()
+
+      if (perfilDestino?.fcm_token) {
+        // Substitua pela URL onde o seu backend Next.js está hospedado (ex: https://brazilzao.vercel.app)
+        const URL_SERVIDOR = typeof window !== 'undefined' && !window.location.host.includes('localhost')
+          ? window.location.origin 
+          : 'https://seu-dominio.vercel.app'
+
+        fetch(`${URL_SERVIDOR}/api/notificacao-chamada`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            token: perfilDestino.fcm_token,
+            remetenteNome: usuarioAtual.username || usuarioAtual.nome,
+            tipo: tipo,
+            conversaId: conversaAberta.id
+          })
+        }).catch((err) => console.error('Erro ao disparar push no Firebase:', err))
+      }
+
+    } catch (err: any) {
+      alert('Não foi possível acessar a câmera ou microfone.')
+    }
+  }
+
+  async function aceitarChamada() {
+    if (!chamadaRecebida || !usuarioAtual) return
+    pararSom()
+
+    try {
+      iniciarAudioContext()
+
+      if (Capacitor.isNativePlatform()) {
+        try { await VoiceRecorder.requestAudioRecordingPermission() } catch (pErr) {}
+        if (chamadaRecebida.tipo === 'video') {
+          try {
+            const { Camera } = await import('@capacitor/camera')
+            await Camera.requestPermissions({ permissions: ['camera'] })
+          } catch (cErr) {}
+        }
+      }
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: AUDIO_CONSTRAINTS,
+        video: chamadaRecebida.tipo === 'video' ? { facingMode: modoCamera } : false
+      })
+
+      localStreamRef.current = stream
+
+      setEmChamada({
+        tipo: chamadaRecebida.tipo,
+        status: 'conectado',
+        microfoneMutado: false,
+        videoAtivo: chamadaRecebida.tipo === 'video'
+      })
+
+      await conectarSalaSinalizacao(chamadaRecebida.conversaId)
+
+      setTimeout(() => {
+        enviarSinalNaSala('resposta_chamada', { aceito: true })
+      }, 300)
+
+      setChamadaRecebida(null)
+
+    } catch (err) {
+      alert('Erro ao aceitar chamada.')
+      recusarChamada()
+    }
+  }
+
+  function recusarChamada() {
+    pararSom()
+    if (chamadaRecebida) {
+      conectarSalaSinalizacao(chamadaRecebida.conversaId)
+      setTimeout(() => {
+        enviarSinalNaSala('resposta_chamada', { aceito: false })
+      }, 200)
+    }
+    setChamadaRecebida(null)
+  }
+
+  async function inverterCamera() {
+    if (!localStreamRef.current || emChamada?.tipo !== 'video') return
+    const novoModo = modoCamera === 'user' ? 'environment' : 'user'
+    setModoCamera(novoModo)
+
+    try {
+      localStreamRef.current.getVideoTracks().forEach(track => track.stop())
+
+      const streamNovo = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: { facingMode: novoModo }
+      })
+
+      const videoTrackNovo = streamNovo.getVideoTracks()[0]
+      const audioTrack = localStreamRef.current.getAudioTracks()[0]
+
+      const streamCombinado = new MediaStream([videoTrackNovo, audioTrack])
+      localStreamRef.current = streamCombinado
+
+      if (videoLocalRef.current) {
+        videoLocalRef.current.srcObject = streamCombinado
+      }
+
+      if (peerConnectionRef.current) {
+        const sender = peerConnectionRef.current.getSenders().find(s => s.track?.kind === 'video')
+        if (sender) sender.replaceTrack(videoTrackNovo)
+      }
+    } catch (err) {}
+  }
+
+  function alternarMicrofone() {
+    if (localStreamRef.current) {
+      const audioTrack = localStreamRef.current.getAudioTracks()[0]
+      if (audioTrack) {
+        audioTrack.enabled = !audioTrack.enabled
+        setEmChamada((prev) => prev ? { ...prev, microfoneMutado: !audioTrack.enabled } : null)
+      }
+    }
+  }
+
+  async function encerrarChamadaLocal() {
+    pararSom()
+
+    if (timerChamadaRef.current) {
+      clearInterval(timerChamadaRef.current)
+      timerChamadaRef.current = null
+    }
+    setTempoChamada(0)
+
+    if (peerConnectionRef.current) {
+      peerConnectionRef.current.ontrack = null
+      peerConnectionRef.current.onicecandidate = null
+      peerConnectionRef.current.close()
+      peerConnectionRef.current = null
+    }
+
+    if (localStreamRef.current) {
+      localStreamRef.current.getTracks().forEach((track) => track.stop())
+      localStreamRef.current = null
+    }
+
+    if (remoteStreamRef.current) {
+      remoteStreamRef.current.getTracks().forEach((track) => track.stop())
+      remoteStreamRef.current = null
+    }
+
+    if (videoLocalRef.current) videoLocalRef.current.srcObject = null
+    if (videoRemotoRef.current) videoRemotoRef.current.srcObject = null
+    if (audioRemotoRef.current) audioRemotoRef.current.srcObject = null
+
+    if (canalSalaRef.current) {
+      const tempCanal = canalSalaRef.current
+      canalSalaRef.current = null
+      await supabase.removeChannel(tempCanal)
+    }
+
+    setEmChamada(null)
+    setChamadaRecebida(null)
+  }
+
+  async function encerrarChamada() {
+    enviarSinalNaSala('encerrar_chamada', {})
+    await encerrarChamadaLocal()
+  }
+
+  function formatarTempo(segundos: number) {
+    const m = Math.floor(segundos / 60)
+    const s = segundos % 60
+    return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`
   }
 
   if (carregando) {
@@ -611,41 +880,65 @@ export default function Mensagens() {
 
   return (
     <main style={page}>
-      <style jsx global>{`
-        @keyframes piscarPonto {
-          0%, 100% { opacity: 1; transform: scale(1); }
-          50% { opacity: 0.3; transform: scale(0.85); }
+      <audio ref={audioRemotoRef} autoPlay playsInline style={{ display: 'none' }} />
+
+      <style>{`
+        @keyframes balancarChama {
+          0% { transform: rotate(0deg) scale(1); }
+          15% { transform: rotate(14deg) scale(1.08); }
+          30% { transform: rotate(-14deg) scale(1.08); }
+          45% { transform: rotate(10deg) scale(1.05); }
+          60% { transform: rotate(-10deg) scale(1.05); }
+          75% { transform: rotate(5deg) scale(1.02); }
+          100% { transform: rotate(0deg) scale(1); }
         }
-        @keyframes animarOnda {
-          0%, 100% { height: 6px; }
-          50% { height: 18px; }
-        }
-        .onda-barrina {
-          width: 3px;
-          background-color: #00a884;
-          border-radius: 3px;
-          animation: animarOnda 1s infinite ease-in-out;
+        .iconeBalancando {
+          animation: balancarChama 0.75s infinite ease-in-out;
         }
       `}</style>
 
+      {/* HEADER SUPERIOR */}
       <header style={topo}>
-        <button style={botaoVoltar} onClick={() => router.push('/feed')}>
-          ←
+        <button style={botaoVoltar} onClick={() => router.push('/feed')} title="Voltar">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#ffffff" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+            <line x1="19" y1="12" x2="5" y2="12" />
+            <polyline points="12 19 5 12 12 5" />
+          </svg>
         </button>
-        <div>
+        <div style={{ flex: 1 }}>
           <h1 style={titulo}>Papo BR</h1>
-          <p style={subtitulo}>Mensagens do BRAZILZÃO</p>
+          <p style={subtitulo}>Meu ID: <strong style={{ color: '#FFD700' }}>@{usuarioAtual?.username || usuarioAtual?.nome}</strong></p>
         </div>
+
+        <button 
+          onClick={() => {
+            setModalAdicionarIDAberto(true)
+            setSugestoesPerfis([])
+          }}
+          style={{ background: '#FFD700', color: '#000', border: 'none', padding: '6px 12px', borderRadius: 20, fontSize: 12, fontWeight: 'bold', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4 }}
+        >
+          🔑 Adicionar ID
+        </button>
       </header>
 
       <section style={container}>
         {!telaConversaAberta && (
           <aside style={listaConversas}>
-            <strong style={tituloLista}>Conversas</strong>
-            {conversas.length === 0 && (
-              <p style={semConversas}>Nenhuma conversa ainda.</p>
+            <div style={containerAbasSuperiores}>
+              <button onClick={() => setAbaAtiva('batepapo')} style={abaAtiva === 'batepapo' ? btnAbaAtiva : btnAbaInativa}>
+                <span>💬 Contatos Autorizados</span>
+              </button>
+            </div>
+
+            {conversasBatePapo.length === 0 && (
+              <div style={{ textAlign: 'center', padding: '40px 20px', color: '#65676b' }}>
+                <span style={{ fontSize: 32, display: 'block', marginBottom: 10 }}>🔑</span>
+                <p style={{ margin: 0, fontWeight: 'bold' }}>Nenhum contato com ID liberado.</p>
+                <p style={{ fontSize: 12, marginTop: 4 }}>Clique em "🔑 Adicionar ID" acima para autorizar amigos para chamadas.</p>
+              </div>
             )}
-            {conversas.map((conversa) => {
+
+            {conversasBatePapo.map((conversa) => {
               const outro = conversa.outroUsuario
               return (
                 <div key={conversa.id} style={conversaItemBox}>
@@ -654,414 +947,294 @@ export default function Mensagens() {
                     onClick={() => {
                       setConversaAberta(conversa)
                       setTelaConversaAberta(true)
-                      setMenuConversaAberto(null)
                     }}
                   >
                     <div style={avatarConversa}>
                       {outro?.foto_url ? (
-                        <img src={outro.foto_url} alt={outro.nome ?? 'Perfil'} style={fotoAvatar} />
+                        <img src={outro.foto_url} alt="" style={fotoAvatar} />
                       ) : (
                         outro?.nome?.charAt(0)?.toUpperCase() ?? 'B'
                       )}
                     </div>
                     <div style={dadosConversa}>
-                      <strong>{outro?.nome ?? 'Usuário'}</strong>
-                      <small>{conversa.ultimaMensagem}</small>
+                      <strong style={{ color: '#008C3A' }}>@{outro?.username || outro?.nome}</strong>
+                      <small style={{ color: '#16a34a', fontWeight: 'bold' }}>🟢 ID Autorizado para Chamadas</small>
                     </div>
-                    <span style={setaConversa}>›</span>
                   </button>
-                  <button
-                    style={botaoMenuConversa}
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      setMenuConversaAberto(menuConversaAberto === conversa.id ? null : conversa.id)
-                    }}
-                  >
-                    ⋮
-                  </button>
-                  {menuConversaAberto === conversa.id && (
-                    <div style={menuConversa}>
-                      <button style={botaoApagarConversa} onClick={() => apagarConversa(conversa.id)}>
-                        Apagar conversa
-                      </button>
-                    </div>
-                  )}
                 </div>
               )
             })}
           </aside>
         )}
 
+        {/* TELA DE CONVERSA ABERTA */}
         {telaConversaAberta && conversaAberta && (
           <section style={janelaConversa}>
-            {/* TOPO DA CONVERSA */}
             <div style={topoConversa}>
               <button
                 style={botaoVoltarConversas}
-                onClick={() => {
+                onClick={async () => {
+                  await encerrarChamadaLocal()
                   setTelaConversaAberta(false)
                   setConversaAberta(null)
                 }}
               >
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M15 18l-6-6 6-6"/></svg>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#e9edef" strokeWidth="2.5"><line x1="19" y1="12" x2="5" y2="12" /><polyline points="12 19 5 12 12 5" /></svg>
               </button>
+
               <div style={avatarTopoConversa}>
                 {conversaAberta.outroUsuario?.foto_url ? (
-                  <img src={conversaAberta.outroUsuario.foto_url} alt="Perfil" style={fotoAvatar} />
+                  <img src={conversaAberta.outroUsuario.foto_url} alt="" style={fotoAvatar} />
                 ) : (
                   conversaAberta.outroUsuario?.nome?.charAt(0)?.toUpperCase() ?? 'B'
                 )}
               </div>
-              <div style={{ flex: 1 }}>
-                <strong style={{ color: '#e9edef', fontSize: 16, display: 'flex', alignItems: 'center', gap: 6 }}>
-                  {conversaAberta.outroUsuario?.nome ?? 'Usuário'}
+
+              <div style={{ flex: 1, overflow: 'hidden' }}>
+                <strong style={{ color: '#e9edef', fontSize: 15, display: 'block' }}>
+                  @{conversaAberta.outroUsuario?.username || conversaAberta.outroUsuario?.nome}
                 </strong>
-
-                {outroNaAtiva ? (
-                  <p style={{ color: '#00a884', fontSize: 12, margin: 0, fontWeight: 'bold', display: 'flex', alignItems: 'center', gap: 4 }}>
-                    <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#00a884', display: 'inline-block' }} />
-                    Na Ativa {outroVistoUltimaVez ? `desde as ${outroVistoUltimaVez}` : ''}
-                  </p>
-                ) : outroVistoUltimaVez ? (
-                  <p style={{ color: '#8696a0', fontSize: 12, margin: 0 }}>
-                    Na Ativa às {outroVistoUltimaVez}
-                  </p>
-                ) : (
-                  <p style={{ color: '#8696a0', fontSize: 12, margin: 0 }}>
-                    @{conversaAberta.outroUsuario?.username ?? 'usuario'}
-                  </p>
-                )}
+                <p style={{ color: '#00a884', fontSize: 11, margin: 0, fontWeight: 'bold' }}>
+                  🔑 Conexão Privada Ativa
+                </p>
               </div>
-            </div>
 
-            {/* SUB-HEADER PINADO */}
-            <div style={subHeaderProjeto}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <span style={{ color: '#00a884', fontSize: 14 }}>📌</span>
-                <span>Projeto: <strong>BRAZILZÃO</strong></span>
+              {/* BOTÕES DE CHAMADA */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                <button
+                  type="button"
+                  onClick={() => iniciarChamada('video')}
+                  style={{ width: 40, height: 40, borderRadius: '50%', backgroundColor: '#2a3942', border: '1.5px solid #374151', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}
+                  title="Chamada de Vídeo"
+                >
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#e9edef" strokeWidth="2"><path d="M23 7l-7 5 7 5V7z" /><rect x="1" y="5" width="15" height="14" rx="3" ry="3" /></svg>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => iniciarChamada('audio')}
+                  style={{ width: 42, height: 42, borderRadius: '50%', backgroundColor: '#ff4d4d', border: '2.5px solid #000', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}
+                  title="Chamada de Áudio"
+                >
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="#000" stroke="#000" strokeWidth="1"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z" /></svg>
+                </button>
               </div>
-              <span 
-                style={{ color: '#00a884', cursor: 'pointer', fontWeight: 600 }}
-                onClick={() => router.push(`/perfil?id=${conversaAberta.outroUsuario?.id}`)}
-              >
-                Ver Perfil &gt;
-              </span>
             </div>
 
             {/* ÁREA DE MENSAGENS */}
             <div style={areaMensagens} ref={areaMensagensRef}>
-              {mensagens.length === 0 && (
-                <p style={semMensagens}>
-                  Comece a conversa com {conversaAberta.outroUsuario?.nome}.
-                </p>
-              )}
               {mensagens.map((mensagem) => {
                 const minha = mensagem.remetente_id === usuarioAtual?.id
-                const ehLink = mensagem.texto.startsWith('http://') || mensagem.texto.startsWith('https://')
-                const temReacoes = mensagem.reacoes && Object.keys(mensagem.reacoes).length > 0
-
                 return (
                   <div key={mensagem.id} style={minha ? linhaMinhaMensagem : linhaOutraMensagem}>
-                    {!minha && (
-                      <div style={avatarMensagemRecebida}>
-                        {conversaAberta.outroUsuario?.foto_url ? (
-                          <img src={conversaAberta.outroUsuario.foto_url} alt="Perfil" style={fotoAvatar} />
-                        ) : (
-                          conversaAberta.outroUsuario?.nome?.charAt(0)?.toUpperCase() ?? 'B'
-                        )}
-                      </div>
-                    )}
-                    <div 
-                      style={{
-                        ...(minha ? minhaMensagem : outraMensagem),
-                        position: 'relative'
-                      }}
-                      onClick={() => setMensagemParaReagir(mensagemParaReagir === mensagem.id ? null : mensagem.id)}
-                    >
-                      {/* MENU POP-UP DE REAÇÕES */}
-                      {mensagemParaReagir === mensagem.id && (
-                        <div style={barrinhaReacoesPopUp}>
-                          {['❤️', '👍', '😂', '😮', '🔥'].map((emoji) => (
-                            <button
-                              key={emoji}
-                              style={btnEmojiReacao}
-                              onClick={(e) => {
-                                e.stopPropagation()
-                                reagirMensagem(mensagem.id, emoji)
-                              }}
-                            >
-                              {emoji}
-                            </button>
-                          ))}
-                        </div>
-                      )}
-
-                      {mensagem.arquivo_url && (
-                        mensagem.arquivo_url.includes('/audio-') || mensagem.arquivo_url.match(/\.(mp3|wav|m4a|webm)$/i) ? (
-                          <audio 
-                            src={mensagem.arquivo_url} 
-                            controls 
-                            style={{ width: '100%', maxWidth: 260, marginBottom: 8, height: 44, outline: 'none' }} 
-                          />
-                        ) : mensagem.arquivo_url.match(/\.(mp4|webm|ogg|mov|mkv)$/i) ? (
-                          <video 
-                            src={mensagem.arquivo_url} 
-                            controls 
-                            style={{ width: '100%', maxHeight: 250, borderRadius: 10, marginBottom: 8, border: minha ? '1px solid #004d3e' : '1px solid #202c33', backgroundColor: '#000' }} 
-                          />
-                        ) : mensagem.arquivo_url.includes('/doc-') ? (
-                          <a 
-                            href={mensagem.arquivo_url} 
-                            target="_blank" 
-                            rel="noopener noreferrer"
-                            style={{ color: '#00a884', fontWeight: 'bold', textDecoration: 'underline', display: 'block', marginBottom: 6, wordBreak: 'break-all' }}
-                          >
-                            📄 Baixar / Abrir Documento
-                          </a>
-                        ) : (
-                          <img 
-                            src={mensagem.arquivo_url} 
-                            alt="Mídia" 
-                            onClick={(e) => {
-                              e.stopPropagation()
-                              setMidiaExpandida(mensagem.arquivo_url || null)
-                            }}
-                            style={{ width: '100%', maxHeight: 250, objectFit: 'cover', borderRadius: 10, marginBottom: 8, border: minha ? '1px solid #004d3e' : '1px solid #202c33', cursor: 'pointer' }} 
-                          />
-                        )
-                      )}
-
-                      {ehLink ? (
-                        <a 
-                          href={mensagem.texto} 
-                          target="_blank" 
-                          rel="noopener noreferrer" 
-                          style={{ color: '#53bdeb', textDecoration: 'underline', wordBreak: 'break-all' }}
-                        >
-                          🔗 {mensagem.texto}
-                        </a>
-                      ) : (
-                        <p style={{ margin: 0, paddingBottom: 6 }}>{mensagem.texto}</p>
-                      )}
-
-                      {temReacoes && (
-                        <div style={boxReacoesFormatado}>
-                          {Array.from(new Set(Object.values(mensagem.reacoes!))).map((em, idx) => (
-                            <span key={idx}>{em}</span>
-                          ))}
-                        </div>
-                      )}
-
-                      <small style={horaMensagem}>
-                        {formatarHora(mensagem.criado_em)}
-                        {minha && <span style={{ color: '#53bdeb', marginLeft: 4, letterSpacing: -2 }}>✓✓</span>}
-                      </small>
+                    <div style={minha ? minhaMensagem : outraMensagem}>
+                      <p style={{ margin: 0 }}>{mensagem.texto}</p>
                     </div>
                   </div>
                 )
               })}
             </div>
 
-            {/* INPUTS ESCONDIDOS */}
-            <input 
-              type="file" 
-              accept="image/*,video/*" 
-              ref={inputMidiaRef} 
-              style={{ display: 'none' }} 
-              onChange={selecionarMidiaParaPreview} 
-            />
-            <input 
-              type="file" 
-              accept="*/*" 
-              ref={inputDocumentoRef} 
-              style={{ display: 'none' }} 
-              onChange={enviarDocumento} 
-            />
-
-            {/* CAIXA DE ENVIAR MENSAGEM */}
+            {/* CAIXA DE ENVIO */}
             <div style={caixaEnviar}>
-              {!gravandoAudio && (
-                <div style={{ position: 'relative' }}>
-                  <button 
-                    style={{...botaoIconeExtra, color: menuAnexosAberto ? '#00a884' : '#8696a0'}}
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      setMenuAnexosAberto(!menuAnexosAberto)
-                    }}
-                  >
-                    <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><circle cx="12" cy="12" r="10"/><path d="M12 8v8M8 12h8"/></svg>
-                  </button>
-
-                  {menuAnexosAberto && (
-                    <div style={menuAnexosPopUp}>
-                      <button style={itemMenuAnexo} onClick={abrirGaleria}>
-                        <span>🖼️</span> Fotos / Vídeos
-                      </button>
-                      <button style={itemMenuAnexo} onClick={abrirDocumentos}>
-                        <span>📄</span> Documento / Arquivo
-                      </button>
-                      <button style={itemMenuAnexo} onClick={enviarLink}>
-                        <span>🔗</span> Enviar Link
-                      </button>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              <div style={containerInputNovo}>
-                {gravandoAudio ? (
-                  <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 16px', background: '#111b21', borderRadius: 24 }}>
-                    <button 
-                      onClick={cancelarEApagarGravacao}
-                      style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', padding: 4, display: 'flex', alignItems: 'center' }}
-                      title="Apagar áudio"
-                    >
-                      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>
-                    </button>
-
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                      <span style={{ width: 10, height: 10, borderRadius: '50%', background: '#ef4444', display: 'inline-block', animation: 'piscarPonto 1s infinite' }} />
-                      <span style={{ color: '#e9edef', fontWeight: 'bold', fontSize: 15, fontFamily: 'monospace' }}>
-                        {formatarTempoGravacao(tempoGravacao)}
-                      </span>
-                    </div>
-
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 3, height: 20 }}>
-                      <div className="onda-barrina" style={{ animationDelay: '0.1s' }} />
-                      <div className="onda-barrina" style={{ animationDelay: '0.3s' }} />
-                      <div className="onda-barrina" style={{ animationDelay: '0.2s' }} />
-                      <div className="onda-barrina" style={{ animationDelay: '0.5s' }} />
-                      <div className="onda-barrina" style={{ animationDelay: '0.4s' }} />
-                      <div className="onda-barrina" style={{ animationDelay: '0.1s' }} />
-                    </div>
-                  </div>
-                ) : (
-                  <>
-                    <input
-                      placeholder="Digite sua mensagem..."
-                      value={novaMensagem}
-                      onChange={(e) => setNovaMensagem(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') enviarMensagem()
-                      }}
-                      style={inputMensagem}
-                    />
-                    <button 
-                      style={{ background: 'none', border: 'none', color: '#8696a0', padding: '0 12px', cursor: 'pointer', flexShrink: 0, display: 'flex', alignItems: 'center' }}
-                      onClick={abrirGaleria}
-                    >
-                      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
-                    </button>
-                  </>
-                )}
-              </div>
-
-              {gravandoAudio ? (
-                <button style={botaoEnviarNovo} onClick={finalizarEEnviarGravacao} title="Enviar áudio">
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
-                </button>
-              ) : novaMensagem.trim() === '' ? (
-                <button style={botaoIconeExtra} onClick={iniciarGravacao} title="Gravar áudio">
-                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
-                </button>
-              ) : (
-                <button style={botaoEnviarNovo} onClick={enviarMensagem} disabled={enviando}>
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
-                </button>
-              )}
+              <input
+                placeholder="Escreva uma mensagem..."
+                value={novaMensagem}
+                onChange={(e) => setNovaMensagem(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && enviarMensagem()}
+                style={inputMensagem}
+              />
+              <button onClick={enviarMensagem} disabled={enviando || !novaMensagem.trim()} style={botaoEnviarNovo}>
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.5"><line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" /></svg>
+              </button>
             </div>
           </section>
         )}
       </section>
 
-      {/* MODAL DE PREVIEW DA MÍDIA SELECIONADA */}
-      {midiaPendente && (
-        <div style={containerPreviewModal}>
-          <div style={headerPreviewModal}>
-            <button 
-              style={btnApagarPreview} 
-              onClick={() => {
-                setMidiaPendente(null)
-                setProgressoUpload(null)
-              }}
-            >
-              🗑️ Cancelar
-            </button>
-            <span style={{ color: '#e9edef', fontWeight: 'bold' }}>
-              {midiaPendente.tipo === 'video' ? 'Vídeo Selecionado' : 'Foto Selecionada'}
-            </span>
-          </div>
+      {/* MODAL ADICIONAR POR ID */}
+      {modalAdicionarIDAberto && (
+        <div style={modalOverlayID} onClick={() => setModalAdicionarIDAberto(false)}>
+          <div style={caixaModalID} onClick={(e) => e.stopPropagation()}>
+            <h3 style={{ margin: '0 0 10px 0', fontSize: 18, color: '#008C3A' }}>🔑 Liberação por ID Privado</h3>
+            <p style={{ fontSize: 13, color: '#65676b', marginBottom: 16 }}>
+              Digite o <strong>@username</strong> ou o <strong>ID do Perfil</strong> do seu amigo para autorizar ligações de vídeo e áudio sem precisar de número de telefone:
+            </p>
 
-          <div style={boxConteudoPreview}>
-            {midiaPendente.tipo === 'video' ? (
-              <video src={midiaPendente.urlPreview} controls style={midiaPreviewMedia} />
-            ) : (
-              <img src={midiaPendente.urlPreview} alt="Preview" style={midiaPreviewMedia} />
-            )}
-          </div>
+            <div style={{ position: 'relative' }}>
+              <input
+                type="text"
+                placeholder="Ex: @joaosilva ou ID do usuário"
+                value={idParaAdicionar}
+                onChange={(e) => setIdParaAdicionar(e.target.value)}
+                style={inputModalID}
+              />
 
-          {progressoUpload !== null && (
-            <div style={boxBarraProgresso}>
-              <div style={{ ...barraProgressoProgresso, width: `${progressoUpload}%` }} />
+              {sugestoesPerfis.length > 0 && (
+                <div style={caixaFlutuanteSugestoes}>
+                  {sugestoesPerfis.map((perfil) => (
+                    <div
+                      key={perfil.id}
+                      style={itemSugestao}
+                      onClick={() => adicionarContatoPorID(perfil)}
+                    >
+                      <div style={avatarSugestao}>
+                        {perfil.foto_url ? (
+                          <img src={perfil.foto_url} alt="" style={{ width: '100%', height: '100%', borderRadius: '50%', objectFit: 'cover' }} />
+                        ) : (
+                          perfil.nome?.charAt(0)?.toUpperCase() ?? 'U'
+                        )}
+                      </div>
+                      <div style={{ flex: 1, overflow: 'hidden' }}>
+                        <strong style={{ fontSize: 13, color: '#008C3A', display: 'block', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                          @{perfil.username || perfil.nome}
+                        </strong>
+                        <small style={{ fontSize: 11, color: '#65676b', display: 'block' }}>
+                          {perfil.nome ?? 'Perfil do Brazilzão'}
+                        </small>
+                      </div>
+                      <span style={{ fontSize: 11, background: '#e6f4ea', color: '#008C3A', padding: '2px 8px', borderRadius: 10, fontWeight: 'bold' }}>
+                        Autorizar 🔑
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
-          )}
 
-          <div style={footerPreviewModal}>
-            <input 
-              placeholder="Adicione uma legenda..."
-              value={legendaMidia}
-              onChange={(e) => setLegendaMidia(e.target.value)}
-              style={inputLegendaPreview}
-            />
-            <button 
-              style={btnConfirmarEnvioPreview} 
-              onClick={confirmarEnvioMidia}
-              disabled={progressoUpload !== null}
-            >
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
-            </button>
+            <div style={{ display: 'flex', gap: 10, marginTop: 16 }}>
+              <button onClick={() => setModalAdicionarIDAberto(false)} style={{ flex: 1, padding: 12, borderRadius: 10, border: 'none', background: '#e4e6eb', fontWeight: 'bold', cursor: 'pointer' }}>
+                Cancelar
+              </button>
+              <button onClick={() => adicionarContatoPorID()} disabled={buscandoID} style={{ flex: 2, padding: 12, borderRadius: 10, border: 'none', background: '#008C3A', color: '#fff', fontWeight: 'bold', cursor: 'pointer' }}>
+                {buscandoID ? 'Verificando...' : 'Autorizar Contato'}
+              </button>
+            </div>
           </div>
         </div>
       )}
 
-      {/* MIDIA EXPANDIDA TELA CHEIA */}
-      {midiaExpandida && (
-        <div 
-          style={{
-            position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh',
-            backgroundColor: 'rgba(0,0,0,0.92)', zIndex: 99999,
-            display: 'flex', justifyContent: 'center', alignItems: 'center',
-            backdropFilter: 'blur(5px)'
-          }}
-          onClick={() => setMidiaExpandida(null)}
-        >
-          <button 
-            style={{
-              position: 'absolute', top: 24, left: 24,
-              background: 'rgba(255,255,255,0.1)', border: 'none', color: '#fff',
-              width: 44, height: 44, borderRadius: '50%', fontSize: 24, cursor: 'pointer',
-              display: 'flex', justifyContent: 'center', alignItems: 'center', transition: '0.2s'
-            }}
-            onClick={(e) => { e.stopPropagation(); setMidiaExpandida(null); }}
-          >
-            ✕
-          </button>
-          {midiaExpandida.match(/\.(mp4|webm|ogg|mov|mkv)$/i) ? (
-            <video 
-              src={midiaExpandida} 
-              controls 
-              autoPlay
-              style={{ maxWidth: '98%', maxHeight: '90vh', borderRadius: 8, boxShadow: '0 10px 40px rgba(0,0,0,0.5)' }} 
-              onClick={(e) => e.stopPropagation()}
-            />
-          ) : (
-            <img 
-              src={midiaExpandida} 
-              alt="Mídia em Tela Cheia" 
-              style={{ maxWidth: '98%', maxHeight: '90vh', objectFit: 'contain', borderRadius: 8, boxShadow: '0 10px 40px rgba(0,0,0,0.5)' }} 
-              onClick={(e) => e.stopPropagation()}
-            />
+      {/* OVERLAY RECEBENDO CHAMADA */}
+      {chamadaRecebida && (
+        <div style={modalChamadaOverlay}>
+          <div style={{ textAlign: 'center', color: '#fff', zIndex: 2, marginTop: 40 }}>
+            <span style={{ fontSize: 13, color: '#00a884', fontWeight: 'bold', textTransform: 'uppercase' }}>
+              Recebendo Chamada de {chamadaRecebida.tipo === 'video' ? 'Vídeo' : 'Áudio'}
+            </span>
+
+            <div style={avatarChamadaBox} className="iconeBalancando">
+              {chamadaRecebida.remetente.foto_url ? (
+                <img src={chamadaRecebida.remetente.foto_url} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+              ) : (
+                <span style={{ fontSize: 40, color: '#fff' }}>
+                  {chamadaRecebida.remetente.nome?.charAt(0).toUpperCase() || 'U'}
+                </span>
+              )}
+            </div>
+
+            <h2 style={{ fontSize: 24, margin: '10px 0 4px 0', fontWeight: 'bold' }}>
+              @{chamadaRecebida.remetente.username || chamadaRecebida.remetente.nome}
+            </h2>
+            <p style={{ fontSize: 14, color: '#FFD700', margin: 0, fontWeight: 'bold' }}>
+              ID Autorizado chamando você...
+            </p>
+          </div>
+
+          <div style={{ display: 'flex', gap: 30, zIndex: 2 }}>
+            <button onClick={recusarChamada} style={{ width: 64, height: 64, borderRadius: '50%', backgroundColor: '#ef4444', border: 'none', color: '#fff', fontSize: 24, cursor: 'pointer' }}>✕</button>
+            <button onClick={aceitarChamada} style={{ width: 64, height: 64, borderRadius: '50%', backgroundColor: '#22c55e', border: 'none', color: '#fff', fontSize: 24, cursor: 'pointer' }}>✓</button>
+          </div>
+        </div>
+      )}
+
+      {/* OVERLAY EM CHAMADA */}
+      {emChamada && (
+        <div style={modalChamadaOverlay}>
+          {emChamada.tipo === 'video' && (
+            <>
+              <video 
+                ref={videoRemotoRef} 
+                autoPlay 
+                playsInline 
+                style={{ 
+                  position: 'absolute', 
+                  top: 0, 
+                  left: 0, 
+                  width: '100vw', 
+                  height: '100vh', 
+                  zIndex: 1, 
+                  objectFit: 'cover', 
+                  backgroundColor: '#000',
+                  pointerEvents: 'none'
+                }} 
+              />
+
+              <video 
+                ref={videoLocalRef} 
+                autoPlay 
+                playsInline 
+                muted 
+                onClick={() => setInverterTelas(!inverterTelas)} 
+                style={{ 
+                  position: 'absolute', 
+                  top: 24, 
+                  right: 20, 
+                  width: 110, 
+                  height: 160, 
+                  borderRadius: 16, 
+                  objectFit: 'cover', 
+                  border: '2px solid #00a884', 
+                  zIndex: 10, 
+                  cursor: 'pointer', 
+                  display: emChamada.videoAtivo ? 'block' : 'none' 
+                }} 
+              />
+            </>
           )}
+
+          <div style={{ textAlign: 'center', color: '#fff', zIndex: 2, marginTop: 30 }}>
+            <span style={{ fontSize: 13, color: '#00a884', fontWeight: 'bold', textTransform: 'uppercase', textShadow: '0 2px 4px rgba(0,0,0,0.8)' }}>
+              {emChamada.tipo === 'video' ? 'Chamada de Vídeo' : 'Chamada de Áudio'}
+            </span>
+
+            {(emChamada.tipo === 'audio' || emChamada.status === 'chamando') && (
+              <>
+                <div style={avatarChamadaBox} className={emChamada.status === 'chamando' ? 'iconeBalancando' : ''}>
+                  {conversaAberta?.outroUsuario?.foto_url ? (
+                    <img src={conversaAberta.outroUsuario.foto_url} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                  ) : (
+                    <span style={{ fontSize: 40, color: '#fff' }}>
+                      {conversaAberta?.outroUsuario?.nome?.charAt(0).toUpperCase() || 'U'}
+                    </span>
+                  )}
+                </div>
+
+                <h2 style={{ fontSize: 22, margin: '10px 0 4px 0', fontWeight: 'bold', textShadow: '0 2px 8px rgba(0,0,0,0.8)' }}>
+                  @{conversaAberta?.outroUsuario?.username || conversaAberta?.outroUsuario?.nome}
+                </h2>
+              </>
+            )}
+
+            <p style={{ fontSize: 14, color: emChamada.status === 'chamando' ? '#FFD700' : '#8696a0', margin: 0, fontWeight: emChamada.status === 'chamando' ? 'bold' : 'normal', textShadow: '0 2px 8px rgba(0,0,0,0.8)' }}>
+              {emChamada.status === 'chamando' ? 'Chamando via ID Privado...' : formatarTempo(tempoChamada)}
+            </p>
+          </div>
+
+          <div style={controlesChamadaBar}>
+            <button onClick={alternarMicrofone} style={{ width: 52, height: 52, borderRadius: '50%', backgroundColor: emChamada.microfoneMutado ? '#ef4444' : '#2a3942', border: '1.5px solid #374151', cursor: 'pointer' }}>
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" /><path d="M19 10v2a7 7 0 0 1-14 0v-2" /><line x1="12" y1="19" x2="12" y2="23" /></svg>
+            </button>
+
+            {emChamada.tipo === 'video' && (
+              <button onClick={inverterCamera} style={{ width: 52, height: 52, borderRadius: '50%', backgroundColor: '#2a3942', border: '1.5px solid #374151', cursor: 'pointer' }}>
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2"><path d="M20 10c0-4.4-3.6-8-8-8s-8 3.6-8 8h3l-4 4-4-4h3c0-5.5 4.5-10 10-10s10 4.5 10 10h-2z" /><path d="M4 14c0 4.4 3.6 8 8 8s8-3.6 8-8h-3l4-4 4 4h-3c0 5.5-4.5 10-10 10s-10-4.5-10-10h2z" /></svg>
+              </button>
+            )}
+
+            <button onClick={encerrarChamada} style={{ width: 62, height: 62, borderRadius: '50%', backgroundColor: '#ff4d4d', border: '2.5px solid #000', cursor: 'pointer' }}>
+              <svg width="24" height="22" viewBox="0 0 24 24" fill="#000" stroke="#000" strokeWidth="1"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z" transform="rotate(135 12 12)" /></svg>
+            </button>
+          </div>
         </div>
       )}
     </main>
@@ -1071,190 +1244,76 @@ export default function Mensagens() {
 /* ESTILOS CSS-IN-JS */
 const page = { minHeight: '100vh', background: '#f2f2f2', fontFamily: 'Arial, sans-serif' }
 const carregandoBox = { minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#008C3A', fontWeight: 900, fontSize: 18 }
-const topo = { background: 'linear-gradient(180deg,#008C3A,#006B2D)', color: '#fff', padding: '14px', display: 'flex', alignItems: 'center', gap: 12, position: 'sticky' as const, top: 0, zIndex: 10, boxSizing: 'border-box' as const }
-const botaoVoltar = { width: 42, height: 42, borderRadius: '50%', border: 'none', background: 'rgba(255,255,255,.18)', color: '#fff', fontSize: 34, lineHeight: 1, cursor: 'pointer' }
-const titulo = { margin: 0, color: '#FFD700', fontSize: 24, fontWeight: 900 }
-const subtitulo = { margin: '2px 0 0', color: '#EAF7EC', fontSize: 12, fontWeight: 700 }
-const container = { maxWidth: 900, margin: '0 auto', padding: 12, width: '100%', boxSizing: 'border-box' as const }
-const listaConversas = { background: '#fff', borderRadius: 18, padding: 12, boxShadow: '0 3px 12px rgba(0,0,0,.09)', minHeight: 'calc(100vh - 115px)', width: '100%', boxSizing: 'border-box' as const }
-const tituloLista = { display: 'block', color: '#008C3A', fontSize: 17, fontWeight: 900, marginBottom: 10 }
-const semConversas = { color: '#777', fontSize: 13, textAlign: 'center' as const, marginTop: 30 }
-const conversaItem = { width: '100%', border: '1px solid #eee', background: '#fff', borderRadius: 14, padding: 10, display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', textAlign: 'left' as const, marginBottom: 8 }
-const avatarConversa = { width: 44, height: 44, borderRadius: '50%', background: '#FFD700', color: '#008C3A', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 900, overflow: 'hidden', flexShrink: 0 }
-const fotoAvatar = { width: '100%', height: '100%', objectFit: 'cover' as const }
-const dadosConversa = { display: 'flex', flexDirection: 'column' as const, gap: 3, overflow: 'hidden' }
-const setaConversa = { marginLeft: 'auto', color: '#008C3A', fontSize: 28, fontWeight: 900 }
+const topo = { background: 'linear-gradient(180deg,#008C3A,#006B2D)', color: '#fff', padding: '14px', display: 'flex', alignItems: 'center', gap: 12, position: 'sticky' as const, top: 0, zIndex: 10 }
+const botaoVoltar = { width: 38, height: 38, borderRadius: '50%', border: 'none', background: 'rgba(255,255,255,.18)', color: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }
+const titulo = { margin: 0, color: '#FFD700', fontSize: 22, fontWeight: 900 }
+const subtitulo = { margin: '2px 0 0', color: '#EAF7EC', fontSize: 12 }
+const container = { maxWidth: 900, margin: '0 auto', padding: '12px 12px 80px 12px', width: '100%' }
+const listaConversas = { background: '#fff', borderRadius: 18, padding: 12, minHeight: 'calc(100vh - 115px)' }
+const containerAbasSuperiores = { display: 'flex', gap: 8, marginBottom: 14, background: '#f0f2f5', padding: 4, borderRadius: 12 }
+const btnAbaAtiva = { flex: 1, padding: '10px', borderRadius: 10, border: 'none', background: '#008C3A', color: '#fff', fontWeight: 'bold' as const, fontSize: 13, cursor: 'pointer' }
+const btnAbaInativa = { flex: 1, padding: '10px', borderRadius: 10, border: 'none', background: 'transparent', color: '#555', fontWeight: '600' as const, fontSize: 13, cursor: 'pointer' }
 const conversaItemBox = { position: 'relative' as const, marginBottom: 8 }
-const botaoMenuConversa = { position: 'absolute' as const, right: 38, top: '50%', transform: 'translateY(-50%)', border: 'none', background: 'transparent', color: '#777', fontSize: 22, fontWeight: 900, cursor: 'pointer', padding: '4px 8px', zIndex: 3 }
-const menuConversa = { position: 'absolute' as const, right: 8, top: 50, background: '#fff', borderRadius: 12, boxShadow: '0 6px 18px rgba(0,0,0,.22)', padding: 6, zIndex: 10, minWidth: 160 }
-const botaoApagarConversa = { width: '100%', border: 'none', background: '#FFF1F1', color: '#C62828', borderRadius: 9, padding: '10px 12px', fontSize: 13, fontWeight: 900, cursor: 'pointer', textAlign: 'left' as const }
+const conversaItem = { width: '100%', border: '1px solid #eee', background: '#fff', borderRadius: 14, padding: 10, display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', textAlign: 'left' as const }
+const avatarConversa = { width: 44, height: 44, borderRadius: '50%', background: '#008C3A', color: '#FFD700', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 900, flexShrink: 0 }
+const fotoAvatar = { width: '100%', height: '100%', objectFit: 'cover' as const }
+const dadosConversa = { display: 'flex', flexDirection: 'column' as const, gap: 2, overflow: 'hidden' }
 
-const janelaConversa = { background: '#0b141a', height: '100vh', width: '100%', position: 'fixed' as const, top: 0, left: 0, zIndex: 50, display: 'flex', flexDirection: 'column' as const, overflow: 'hidden' }
-const topoConversa = { padding: '10px 16px', background: '#0b141a', display: 'flex', alignItems: 'center', gap: 14, borderBottom: '1px solid #202c33', paddingTop: 'max(10px, env(safe-area-inset-top))' }
-const avatarTopoConversa = { width: 44, height: 44, borderRadius: '50%', background: '#111b21', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 900, overflow: 'hidden', border: '1px solid #00a884', flexShrink: 0 }
-const botaoVoltarConversas = { width: 36, height: 36, borderRadius: '50%', border: 'none', background: '#202c33', color: '#e9edef', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }
-const subHeaderProjeto = { background: '#0b141a', color: '#8696a0', fontSize: 11, padding: '10px 16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid #202c33' }
+const janelaConversa = { background: '#0b141a', height: '100vh', width: '100%', position: 'fixed' as const, top: 0, left: 0, zIndex: 100000, display: 'flex', flexDirection: 'column' as const }
+const topoConversa = { padding: '10px 16px', background: '#111b21', display: 'flex', alignItems: 'center', gap: 12, borderBottom: '1px solid #222d34' }
+const avatarTopoConversa = { width: 40, height: 40, borderRadius: '50%', background: '#008C3A', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold' as const, overflow: 'hidden', flexShrink: 0 }
+const botaoVoltarConversas = { width: 34, height: 34, borderRadius: '50%', border: 'none', background: '#202c33', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }
 const areaMensagens = { flex: 1, padding: '16px', overflowY: 'auto' as const, background: '#0b141a' }
-const semMensagens = { color: '#8696a0', textAlign: 'center' as const, marginTop: 40, background: '#202c33', padding: '10px 16px', borderRadius: 20, width: 'fit-content', margin: '40px auto', fontSize: 14 }
-const linhaMinhaMensagem = { display: 'flex', justifyContent: 'flex-end', marginBottom: 16 }
-const linhaOutraMensagem = { display: 'flex', justifyContent: 'flex-start', marginBottom: 16, alignItems: 'flex-end' }
-const avatarMensagemRecebida = { width: 32, height: 32, borderRadius: '50%', background: '#FFD700', color: '#000', marginRight: 8, flexShrink: 0, overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 900, border: '1px solid #00a884' }
-const minhaMensagem = { maxWidth: '75%', background: '#005c4b', color: '#e9edef', borderRadius: '14px 14px 4px 14px', padding: '8px 12px', fontSize: 15, lineHeight: 1.4, cursor: 'pointer' }
-const outraMensagem = { maxWidth: '75%', background: '#202c33', color: '#e9edef', borderRadius: '14px 14px 14px 4px', padding: '8px 12px', fontSize: 15, lineHeight: 1.4, cursor: 'pointer' }
-const horaMensagem = { fontSize: 11, color: '#8696a0', display: 'flex', justifyContent: 'flex-end', alignItems: 'center', marginTop: 4 }
-const caixaEnviar = { padding: '12px', display: 'flex', gap: 10, background: '#0b141a', alignItems: 'center', paddingBottom: 'max(12px, env(safe-area-inset-bottom))' }
-const containerInputNovo = { flex: 1, display: 'flex', alignItems: 'center', background: '#202c33', borderRadius: 24, overflow: 'hidden' }
-const inputMensagem = { flex: 1, minWidth: 0, border: 'none', background: 'transparent', color: '#e9edef', padding: '12px 16px', outline: 'none', fontSize: 15 }
-const botaoIconeExtra = { background: 'transparent', border: 'none', color: '#8696a0', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 4 }
-const botaoEnviarNovo = { width: 44, height: 44, borderRadius: '50%', background: '#00a884', border: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }
+const linhaMinhaMensagem = { display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }
+const linhaOutraMensagem = { display: 'flex', justifyContent: 'flex-start', marginBottom: 12 }
+const minhaMensagem = { maxWidth: '75%', background: '#005c4b', color: '#fff', borderRadius: '14px 14px 4px 14px', padding: '8px 12px', fontSize: 14 }
+const outraMensagem = { maxWidth: '75%', background: '#202c33', color: '#fff', borderRadius: '14px 14px 14px 4px', padding: '8px 12px', fontSize: 14 }
+const caixaEnviar = { padding: '12px', display: 'flex', gap: 10, background: '#111b21', alignItems: 'center' }
+const inputMensagem = { flex: 1, border: 'none', background: '#222d34', color: '#fff', padding: '12px 16px', borderRadius: 24, outline: 'none', fontSize: 14 }
+const botaoEnviarNovo = { width: 42, height: 42, borderRadius: '50%', background: '#00a884', color: '#fff', border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }
 
-const menuAnexosPopUp = {
+const modalOverlayID = { position: 'fixed' as const, top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.6)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 150000, padding: 20 }
+const caixaModalID = { background: '#fff', padding: 20, borderRadius: 20, width: '100%', maxWidth: 420, boxShadow: '0 10px 30px rgba(0,0,0,0.3)' }
+const inputModalID = { width: '100%', padding: '12px 16px', borderRadius: 12, border: '1px solid #ccc', fontSize: 14, outline: 'none', boxSizing: 'border-box' as const }
+
+const caixaFlutuanteSugestoes = {
   position: 'absolute' as const,
-  bottom: 50,
+  top: '100%',
   left: 0,
-  background: '#202c33',
-  borderRadius: 16,
-  padding: '8px 0',
-  boxShadow: '0 8px 24px rgba(0,0,0,0.5)',
-  display: 'flex',
-  flexDirection: 'column' as const,
-  zIndex: 100,
-  minWidth: 200,
-  border: '1px solid #111b21'
+  right: 0,
+  background: '#fff',
+  borderRadius: 14,
+  boxShadow: '0 10px 28px rgba(0,0,0,0.3)',
+  border: '1px solid #e4e6eb',
+  marginTop: 6,
+  zIndex: 1000,
+  overflow: 'hidden' as const,
+  maxHeight: 230
 }
 
-const itemMenuAnexo = {
-  background: 'transparent',
-  border: 'none',
-  color: '#e9edef',
-  padding: '12px 16px',
-  textAlign: 'left' as const,
-  fontSize: 14,
-  fontWeight: 600,
-  cursor: 'pointer',
+const itemSugestao = {
   display: 'flex',
   alignItems: 'center',
-  gap: 10
-}
-
-const containerPreviewModal = {
-  position: 'fixed' as const,
-  top: 0,
-  left: 0,
-  width: '100vw',
-  height: '100vh',
-  background: '#0b141a',
-  zIndex: 9999,
-  display: 'flex',
-  flexDirection: 'column' as const
-}
-
-const headerPreviewModal = {
-  padding: '16px',
-  display: 'flex',
-  justify: 'space-between',
-  alignItems: 'center',
-  borderBottom: '1px solid #202c33'
-}
-
-const btnApagarPreview = {
-  background: '#ef4444',
-  color: '#fff',
-  border: 'none',
-  padding: '8px 14px',
-  borderRadius: 20,
-  fontWeight: 'bold',
-  cursor: 'pointer',
-  fontSize: 13
-}
-
-const boxConteudoPreview = {
-  flex: 1,
-  display: 'flex',
-  alignItems: 'center',
-  justify: 'center',
-  padding: '16px',
-  overflow: 'hidden'
-}
-
-const midiaPreviewMedia = {
-  maxWidth: '100%',
-  maxHeight: '100%',
-  borderRadius: 12,
-  objectFit: 'contain' as const
-}
-
-const boxBarraProgresso = {
-  height: 4,
-  width: '100%',
-  background: '#202c33'
-}
-
-const barraProgressoProgresso = {
-  height: '100%',
-  background: '#00a884',
-  transition: 'width 0.2s'
-}
-
-const footerPreviewModal = {
-  padding: '16px',
-  display: 'flex',
   gap: 10,
-  alignItems: 'center',
-  background: '#111b21'
-}
-
-const inputLegendaPreview = {
-  flex: 1,
-  background: '#202c33',
-  border: 'none',
-  color: '#e9edef',
-  padding: '12px 16px',
-  borderRadius: 24,
-  outline: 'none',
-  fontSize: 15
-}
-
-const btnConfirmarEnvioPreview = {
-  width: 44,
-  height: 44,
-  borderRadius: '50%',
-  background: '#00a884',
-  border: 'none',
-  display: 'flex',
-  alignItems: 'center',
-  justify: 'center',
-  cursor: 'pointer'
-}
-
-const barrinhaReacoesPopUp = {
-  position: 'absolute' as const,
-  top: -42,
-  left: 0,
-  background: '#202c33',
-  borderRadius: 20,
-  padding: '4px 8px',
-  display: 'flex',
-  gap: 6,
-  boxShadow: '0 4px 16px rgba(0,0,0,0.4)',
-  zIndex: 10
-}
-
-const btnEmojiReacao = {
-  background: 'none',
-  border: 'none',
-  fontSize: 20,
+  padding: '10px 14px',
   cursor: 'pointer',
-  padding: '2px 4px'
+  borderBottom: '1px solid #f0f2f5',
+  transition: 'background 0.2s'
 }
 
-const boxReacoesFormatado = {
-  display: 'inline-flex',
-  gap: 2,
-  background: '#111b21',
-  borderRadius: 10,
-  padding: '2px 6px',
-  fontSize: 12,
-  marginTop: 4,
-  border: '1px solid #202c33'
+const avatarSugestao = {
+  width: 36,
+  height: 36,
+  borderRadius: '50%',
+  background: '#008C3A',
+  color: '#FFD700',
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  fontWeight: 'bold' as const,
+  flexShrink: 0
 }
+
+const modalChamadaOverlay = { position: 'fixed' as const, top: 0, left: 0, width: '100vw', height: '100vh', background: '#111b21', zIndex: 200000, display: 'flex', flexDirection: 'column' as const, justifyContent: 'space-between', alignItems: 'center', padding: '50px 20px' }
+const avatarChamadaBox = { width: 110, height: 110, borderRadius: '50%', background: '#008C3A', margin: '20px auto', overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 0 30px rgba(0, 168, 132, 0.4)' }
+const controlesChamadaBar = { display: 'flex', alignItems: 'center', gap: 20, zIndex: 20 }
