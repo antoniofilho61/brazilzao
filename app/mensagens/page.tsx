@@ -70,6 +70,47 @@ const AUDIO_CONSTRAINTS = {
   autoGainControl: true
 }
 
+// 1. Gera faixa de vídeo preta sintética caso o computador não tenha webcam
+function criarTrackVideoPreta(width = 640, height = 480): MediaStreamTrack {
+  const canvas = document.createElement('canvas')
+  canvas.width = width
+  canvas.height = height
+  const ctx = canvas.getContext('2d')
+  if (ctx) {
+    ctx.fillStyle = '#000000'
+    ctx.fillRect(0, 0, width, height)
+  }
+  const stream = canvas.captureStream(1)
+  return stream.getVideoTracks()[0]
+}
+
+// 2. Captura mídias sem travar se faltar mic ou webcam (ideal para PCs de mesa)
+async function obterStreamComFallback(tipo: 'audio' | 'video', modoCamera: string): Promise<MediaStream> {
+  const stream = new MediaStream()
+
+  try {
+    const audioStream = await navigator.mediaDevices.getUserMedia({ audio: AUDIO_CONSTRAINTS })
+    audioStream.getAudioTracks().forEach((track) => stream.addTrack(track))
+  } catch (e) {
+    console.warn('⚠️ Nenhum microfone encontrado. Chamada continuará sem áudio local.')
+  }
+
+  if (tipo === 'video') {
+    try {
+      const videoStream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: modoCamera }
+      })
+      videoStream.getVideoTracks().forEach((track) => stream.addTrack(track))
+    } catch (e) {
+      console.warn('⚠️ Nenhuma câmera encontrada. Enviando tela preta sintética.')
+      const trackPreta = criarTrackVideoPreta()
+      stream.addTrack(trackPreta)
+    }
+  }
+
+  return stream
+}
+
 export default function Mensagens() {
   const router = useRouter()
   const [carregando, setCarregando] = useState(true)
@@ -78,7 +119,6 @@ export default function Mensagens() {
   // ABAS & CONVERSAS
   const [abaAtiva, setAbaAtiva] = useState<'batepapo' | 'vendas'>('batepapo')
   const [conversasBatePapo, setConversasBatePapo] = useState<Conversa[]>([])
-  const [conversasVendas, setConversasVendas] = useState<Conversa[]>([])
   const [conversaAberta, setConversaAberta] = useState<Conversa | null>(null)
   const [mensagens, setMensagens] = useState<Mensagem[]>([])
   const [telaConversaAberta, setTelaConversaAberta] = useState(false)
@@ -91,16 +131,14 @@ export default function Mensagens() {
   const [sugestoesPerfis, setSugestoesPerfis] = useState<Usuario[]>([])
   const [buscandoID, setBuscandoID] = useState(false)
 
-  // WEBRTC & SINALIZAÇÃO
+  // WEBRTC & SINALIZA
   const localStreamRef = useRef<MediaStream | null>(null)
   const remoteStreamRef = useRef<MediaStream | null>(null)
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null)
   const canalSalaRef = useRef<RealtimeChannel | null>(null)
-
   const videoLocalRef = useRef<HTMLVideoElement | null>(null)
   const videoRemotoRef = useRef<HTMLVideoElement | null>(null)
   const audioRemotoRef = useRef<HTMLAudioElement | null>(null)
-
   const [modoCamera, setModoCamera] = useState<'user' | 'environment'>('user')
   const [inverterTelas, setInverterTelas] = useState(false)
 
@@ -124,7 +162,6 @@ export default function Mensagens() {
 
   const [tempoChamada, setTempoChamada] = useState(0)
   const timerChamadaRef = useRef<NodeJS.Timeout | null>(null)
-
   const [enviando, setEnviando] = useState(false)
 
   useEffect(() => {
@@ -134,22 +171,18 @@ export default function Mensagens() {
     }
   }, [])
 
-  // REGISTRAR NOTIFICAÇÃO NATIVA (FCM) DINÂMICAMENTE
+  // REGISTRAR PUSH FCM NO BANCO
   async function registrarPushNotifications(meuId: string) {
     if (!Capacitor.isNativePlatform()) return
-
     try {
       const { PushNotifications } = await import('@capacitor/push-notifications')
-
       let permStatus = await PushNotifications.checkPermissions()
       if (permStatus.receive === 'prompt') {
         permStatus = await PushNotifications.requestPermissions()
       }
-
       if (permStatus.receive === 'granted') {
         await PushNotifications.register()
       }
-
       PushNotifications.addListener('registration', async (token) => {
         if (token.value && meuId) {
           await supabase
@@ -168,32 +201,27 @@ export default function Mensagens() {
       setSugestoesPerfis([])
       return
     }
-
     const timer = setTimeout(async () => {
       try {
         const ehUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(termo)
         let query = supabase.from('profiles').select('id, nome, username, foto_url')
-
         if (ehUUID) {
           query = query.or(`username.ilike.%${termo}%,id.eq.${termo}`)
         } else {
           query = query.or(`username.ilike.%${termo}%,nome.ilike.%${termo}%`)
         }
-
         const { data } = await query.limit(5)
         if (data) {
           setSugestoesPerfis(data.filter((u) => u.id !== usuarioAtual?.id))
         }
       } catch (e) {}
     }, 250)
-
     return () => clearTimeout(timer)
   }, [idParaAdicionar, usuarioAtual?.id])
 
   // ESCUTA GLOBAL DE CHAMADAS
   useEffect(() => {
     if (!usuarioAtual?.id) return
-
     const canalPessoal = supabase
       .channel(`chamadas-pessoal-${usuarioAtual.id}`)
       .on('broadcast', { event: 'solicitar_chamada' }, (payload) => {
@@ -213,9 +241,7 @@ export default function Mensagens() {
       await supabase.removeChannel(canalSalaRef.current)
       canalSalaRef.current = null
     }
-
     const canal = supabase.channel(`sala-chamada-${salaId}`)
-
     canal
       .on('broadcast', { event: 'resposta_chamada' }, async (payload) => {
         const { aceito } = payload.payload
@@ -258,15 +284,12 @@ export default function Mensagens() {
 
   function criarPeerConnection() {
     if (peerConnectionRef.current) return peerConnectionRef.current
-
     const pc = new RTCPeerConnection(ICE_SERVERS)
-
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach((track) => {
         pc.addTrack(track, localStreamRef.current!)
       })
     }
-
     pc.ontrack = (e) => {
       if (!remoteStreamRef.current) {
         remoteStreamRef.current = new MediaStream()
@@ -274,16 +297,13 @@ export default function Mensagens() {
       e.streams[0].getTracks().forEach((track) => {
         remoteStreamRef.current?.addTrack(track)
       })
-
       conectarStreamRemotoNoVideo()
     }
-
     pc.onicecandidate = (e) => {
       if (e.candidate) {
         enviarSinalNaSala('webrtc_candidate', { candidate: e.candidate })
       }
     }
-
     peerConnectionRef.current = pc
     return pc
   }
@@ -346,7 +366,6 @@ export default function Mensagens() {
       iniciarAudioContext()
       const ctx = audioCtxRef.current
       if (!ctx) return
-
       const tocarTu = () => {
         if (!ctx || ctx.state === 'closed') return
         try {
@@ -362,7 +381,6 @@ export default function Mensagens() {
           osc.stop(ctx.currentTime + 1.2)
         } catch (e) {}
       }
-
       tocarTu()
       ringtoneIntervalRef.current = setInterval(tocarTu, 3000)
     } catch (e) {}
@@ -374,7 +392,6 @@ export default function Mensagens() {
       iniciarAudioContext()
       const ctx = audioCtxRef.current
       if (!ctx) return
-
       const tocarTrim = () => {
         if (!ctx || ctx.state === 'closed') return
         try {
@@ -390,7 +407,6 @@ export default function Mensagens() {
           osc.stop(ctx.currentTime + 0.8)
         } catch (e) {}
       }
-
       tocarTrim()
       ringtoneIntervalRef.current = setInterval(tocarTrim, 1500)
     } catch (e) {}
@@ -409,7 +425,6 @@ export default function Mensagens() {
     } else {
       pararSom()
     }
-
     if (emChamada?.status === 'conectado') {
       timerChamadaRef.current = setInterval(() => {
         setTempoChamada((prev) => prev + 1)
@@ -418,7 +433,6 @@ export default function Mensagens() {
       if (timerChamadaRef.current) clearInterval(timerChamadaRef.current)
       setTempoChamada(0)
     }
-
     return () => {
       if (timerChamadaRef.current) clearInterval(timerChamadaRef.current)
     }
@@ -443,7 +457,6 @@ export default function Mensagens() {
       router.replace('/login')
       return
     }
-
     const authUserId = sessao.session.user.id
     let { data: usuario } = await supabase
       .from('profiles')
@@ -471,7 +484,6 @@ export default function Mensagens() {
 
     const parametros = new URLSearchParams(window.location.search)
     const usuarioDestinoId = parametros.get('para') || parametros.get('id')
-
     if (usuarioDestinoId && usuarioDestinoId !== usuario.id) {
       await abrirOuCriarConversa(usuario.id, usuarioDestinoId)
       setTelaConversaAberta(true)
@@ -481,66 +493,170 @@ export default function Mensagens() {
     setCarregando(false)
   }
 
+  // BUSCA APENAS CONTATOS ONDE AMBOS ADICIONARAM O ID MÚTUO
   async function carregarConversas(meuId: string) {
-    const { data: convData } = await supabase
-      .from('conversas')
-      .select('*')
-      .or(`usuario_1.eq.${meuId},usuario_2.eq.${meuId}`)
-      .order('criado_em', { ascending: false })
+    const { data: meusAdicionados } = await supabase
+      .from('contatos_autorizados')
+      .select('contato_id')
+      .eq('usuario_id', meuId)
 
-    const conversasBase = convData ?? []
-    const idsOutros = conversasBase.map((c) => (c.usuario_1 === meuId ? c.usuario_2 : c.usuario_1))
-    let usuariosMapa: Record<string, Usuario> = {}
+    const { data: meAdicionaram } = await supabase
+      .from('contatos_autorizados')
+      .select('usuario_id')
+      .eq('contato_id', meuId)
 
-    if (idsOutros.length > 0) {
-      const { data: perfis } = await supabase.from('profiles').select('id, nome, username, foto_url').in('id', idsOutros)
-      usuariosMapa = (perfis ?? []).reduce((mapa: Record<string, Usuario>, u) => {
-        mapa[u.id] = u
-        return mapa
-      }, {})
+    const meusIdsSet = new Set((meusAdicionados || []).map((item) => item.contato_id))
+    const meAdicionaramSet = new Set((meAdicionaram || []).map((item) => item.usuario_id))
+
+    const idsMutuos = [...meusIdsSet].filter((id) => meAdicionaramSet.has(id))
+
+    if (idsMutuos.length === 0) {
+      setConversasBatePapo([])
+      return
     }
 
+    const { data: perfis } = await supabase
+      .from('profiles')
+      .select('id, nome, username, foto_url')
+      .in('id', idsMutuos)
+
+    const usuariosMapa: Record<string, Usuario> = (perfis ?? []).reduce(
+      (mapa: Record<string, Usuario>, u) => {
+        mapa[u.id] = u
+        return mapa
+      },
+      {}
+    )
+
     const conversasMontadas = await Promise.all(
-      conversasBase.map(async (c) => {
-        const outroId = c.usuario_1 === meuId ? c.usuario_2 : c.usuario_1
-        const { data: ultima } = await supabase
-          .from('mensagens')
-          .select('texto, lida, destinatario_id')
-          .eq('conversa_id', c.id)
-          .order('criado_em', { ascending: false })
-          .limit(1)
+      idsMutuos.map(async (outroId) => {
+        let { data: conv } = await supabase
+          .from('conversas')
+          .select('*')
+          .or(`and(usuario_1.eq.${meuId},usuario_2.eq.${outroId}),and(usuario_1.eq.${outroId},usuario_2.eq.${meuId})`)
           .maybeSingle()
 
+        if (!conv) {
+          const { data: novaConv } = await supabase
+            .from('conversas')
+            .insert({ usuario_1: meuId, usuario_2: outroId })
+            .select()
+            .single()
+          conv = novaConv
+        }
+
+        const { data: ultima } = conv
+          ? await supabase
+              .from('mensagens')
+              .select('texto, lida, destinatario_id')
+              .eq('conversa_id', conv.id)
+              .order('criado_em', { ascending: false })
+              .limit(1)
+              .maybeSingle()
+          : { data: null }
+
         return {
-          ...c,
+          id: conv?.id || `conv-${outroId}`,
+          usuario_1: meuId,
+          usuario_2: outroId,
+          criado_em: conv?.criado_em || new Date().toISOString(),
+          atualizado_em: conv?.atualizado_em || new Date().toISOString(),
           outroUsuario: usuariosMapa[outroId] ?? null,
-          ultimaMensagem: ultima?.texto ?? 'Conversa iniciada',
+          ultimaMensagem: ultima?.texto ?? 'ID Mútuo Liberado!',
           naoLida: !ultima?.lida && ultima?.destinatario_id === meuId,
           ehVendas: false
         }
       })
     )
+
     setConversasBatePapo(conversasMontadas)
+  }
+
+  // REGISTRA O ID E VALIDA SE AMBOS SE ADICIONARAM
+  async function adicionarContatoPorID(perfilDireto?: Usuario) {
+    let perfilParaAdicionar = perfilDireto
+    if (!perfilParaAdicionar) {
+      const termo = idParaAdicionar.trim().replace('@', '')
+      if (!termo) return alert('Digite o ID ou @username do seu amigo.')
+      setBuscandoID(true)
+      try {
+        const ehUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(termo)
+        let consulta = supabase.from('profiles').select('id, nome, username, foto_url')
+        if (ehUUID) {
+          consulta = consulta.or(`username.ilike.${termo},id.eq.${termo}`)
+        } else {
+          consulta = consulta.ilike('username', termo)
+        }
+        const { data: perfilEncontrado, error } = await consulta.maybeSingle()
+        if (error || !perfilEncontrado) {
+          alert('Nenhum usuário encontrado com esse @username ou ID.')
+          setBuscandoID(false)
+          return
+        }
+        perfilParaAdicionar = perfilEncontrado
+      } catch (e: any) {
+        alert(`Erro ao buscar ID: ${e?.message || e}`)
+        setBuscandoID(false)
+        return
+      }
+    }
+
+    if (perfilParaAdicionar.id === usuarioAtual?.id) {
+      alert('Você não pode adicionar seu próprio ID.')
+      setBuscandoID(false)
+      return
+    }
+
+    try {
+      const { error: errUpsert } = await supabase.from('contatos_autorizados').upsert(
+        { usuario_id: usuarioAtual!.id, contato_id: perfilParaAdicionar.id },
+        { onConflict: 'usuario_id,contato_id' }
+      )
+
+      if (errUpsert) {
+        alert(`❌ Erro no Supabase: ${errUpsert.message}`)
+        setBuscandoID(false)
+        return
+      }
+
+      const { data: eleMeAdicionou } = await supabase
+        .from('contatos_autorizados')
+        .select('id')
+        .eq('usuario_id', perfilParaAdicionar.id)
+        .eq('contato_id', usuarioAtual!.id)
+        .maybeSingle()
+
+      if (eleMeAdicionou) {
+        alert(`🎉 ID MÚTUO CONFIRMADO!\n\nVocê e @${perfilParaAdicionar.username || perfilParaAdicionar.nome} agora estão liberados para chamadas.`)
+      } else {
+        alert(`📌 ID registrado!\n\nPara o contato aparecer na lista, peça para @${perfilParaAdicionar.username || perfilParaAdicionar.nome} adicionar seu ID (@${usuarioAtual?.username || usuarioAtual?.nome}) no app dele.`)
+      }
+
+      await carregarConversas(usuarioAtual!.id)
+      setModalAdicionarIDAberto(false)
+      setIdParaAdicionar('')
+      setSugestoesPerfis([])
+    } catch (e: any) {
+      alert(`Erro inesperado: ${e?.message || e}`)
+    } finally {
+      setBuscandoID(false)
+    }
   }
 
   async function abrirOuCriarConversa(meuId: string, outroUsuarioId: string) {
     const { data: conv1 } = await supabase.from('conversas').select('*').eq('usuario_1', meuId).eq('usuario_2', outroUsuarioId).maybeSingle()
     let conversaExistente = conv1
-
     if (!conversaExistente) {
       const { data: conv2 } = await supabase.from('conversas').select('*').eq('usuario_1', outroUsuarioId).eq('usuario_2', meuId).maybeSingle()
       conversaExistente = conv2
     }
-
     if (conversaExistente) {
       const montada = await montarConversaComUsuario(conversaExistente, meuId)
       setConversaAberta(montada)
       return montada
     }
-
     const { data: nova, error } = await supabase.from('conversas').insert({ usuario_1: meuId, usuario_2: outroUsuarioId }).select().single()
     if (error || !nova) return null
-
     const montada = await montarConversaComUsuario(nova, meuId)
     setConversaAberta(montada)
     return montada
@@ -565,10 +681,8 @@ export default function Mensagens() {
     if (!usuarioAtual || !conversaAberta) return
     const texto = novaMensagem.trim()
     if (!texto) return
-
     const destinatarioId = conversaAberta.usuario_1 === usuarioAtual.id ? conversaAberta.usuario_2 : conversaAberta.usuario_1
     setEnviando(true)
-
     const { error } = await supabase.from('mensagens').insert({
       conversa_id: conversaAberta.id,
       remetente_id: usuarioAtual.id,
@@ -576,7 +690,6 @@ export default function Mensagens() {
       texto,
       lida: false
     })
-
     if (!error) {
       setNovaMensagem('')
       await carregarMensagens(conversaAberta.id)
@@ -584,63 +697,9 @@ export default function Mensagens() {
     setEnviando(false)
   }
 
-  async function adicionarContatoPorID(perfilDireto?: Usuario) {
-    let perfilParaAdicionar = perfilDireto
-
-    if (!perfilParaAdicionar) {
-      const termo = idParaAdicionar.trim().replace('@', '')
-      if (!termo) return alert('Digite o ID ou @username do seu amigo.')
-
-      setBuscandoID(true)
-      try {
-        const ehUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(termo)
-        let consulta = supabase.from('profiles').select('id, nome, username, foto_url')
-
-        if (ehUUID) {
-          consulta = consulta.or(`username.ilike.${termo},id.eq.${termo}`)
-        } else {
-          consulta = consulta.ilike('username', termo)
-        }
-
-        const { data: perfilEncontrado, error } = await consulta.maybeSingle()
-        if (error || !perfilEncontrado) {
-          alert('Nenhum usuário encontrado com esse @username ou ID.')
-          setBuscandoID(false)
-          return
-        }
-        perfilParaAdicionar = perfilEncontrado
-      } catch (e) {
-        alert('Erro ao buscar ID.')
-        setBuscandoID(false)
-        return
-      }
-    }
-
-    if (perfilParaAdicionar.id === usuarioAtual?.id) {
-      alert('Você não pode adicionar seu próprio ID.')
-      setBuscandoID(false)
-      return
-    }
-
-    try {
-      await abrirOuCriarConversa(usuarioAtual!.id, perfilParaAdicionar.id)
-      await carregarConversas(usuarioAtual!.id)
-      setModalAdicionarIDAberto(false)
-      setIdParaAdicionar('')
-      setSugestoesPerfis([])
-      setTelaConversaAberta(true)
-      alert(`Contato @${perfilParaAdicionar.username || perfilParaAdicionar.nome} autorizado com sucesso!`)
-    } catch (e) {
-      alert('Erro ao autorizar contato.')
-    } finally {
-      setBuscandoID(false)
-    }
-  }
-
   async function iniciarChamada(tipo: 'audio' | 'video') {
     if (!conversaAberta || !conversaAberta.outroUsuario?.id || !usuarioAtual) return
     const destinatario = conversaAberta.outroUsuario
-
     await encerrarChamadaLocal()
 
     try {
@@ -656,12 +715,9 @@ export default function Mensagens() {
         }
       }
 
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: AUDIO_CONSTRAINTS,
-        video: tipo === 'video' ? { facingMode: modoCamera } : false
-      })
-
+      const stream = await obterStreamComFallback(tipo, modoCamera)
       localStreamRef.current = stream
+
       setEmChamada({
         tipo,
         status: 'chamando',
@@ -671,7 +727,7 @@ export default function Mensagens() {
 
       await conectarSalaSinalizacao(conversaAberta.id)
 
-      // 1. Sinalização Broadcast em Tempo Real
+      // 1. Sinaliza em tempo real
       const canalNotif = supabase.channel(`chamadas-pessoal-${destinatario.id}`)
       canalNotif.subscribe((status) => {
         if (status === 'SUBSCRIBED') {
@@ -688,7 +744,7 @@ export default function Mensagens() {
         usuario_id: destinatario.id,
         remetente_id: usuarioAtual.id,
         tipo: 'chamada_recebida',
-        mensagem: `🔑 @${usuarioAtual.username || usuarioAtual.nome} está te ligando no Papo BR...`,
+        mensagem: `📞 @${usuarioAtual.username || usuarioAtual.nome} está te ligando no Papo BR...`,
         link: `/mensagens?para=${usuarioAtual.id}`,
         lida: false
       })
@@ -701,11 +757,7 @@ export default function Mensagens() {
         .maybeSingle()
 
       if (perfilDestino?.fcm_token) {
-        // Substitua pela URL onde o seu backend Next.js está hospedado (ex: https://brazilzao.vercel.app)
-        const URL_SERVIDOR = typeof window !== 'undefined' && !window.location.host.includes('localhost')
-          ? window.location.origin 
-          : 'https://seu-dominio.vercel.app'
-
+        const URL_SERVIDOR = 'https://papo-br-brazilzao.vercel.app'
         fetch(`${URL_SERVIDOR}/api/notificacao-chamada`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -717,9 +769,8 @@ export default function Mensagens() {
           })
         }).catch((err) => console.error('Erro ao disparar push no Firebase:', err))
       }
-
     } catch (err: any) {
-      alert('Não foi possível acessar a câmera ou microfone.')
+      alert('Não foi possível iniciar a chamada.')
     }
   }
 
@@ -740,11 +791,7 @@ export default function Mensagens() {
         }
       }
 
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: AUDIO_CONSTRAINTS,
-        video: chamadaRecebida.tipo === 'video' ? { facingMode: modoCamera } : false
-      })
-
+      const stream = await obterStreamComFallback(chamadaRecebida.tipo, modoCamera)
       localStreamRef.current = stream
 
       setEmChamada({
@@ -755,13 +802,11 @@ export default function Mensagens() {
       })
 
       await conectarSalaSinalizacao(chamadaRecebida.conversaId)
-
       setTimeout(() => {
         enviarSinalNaSala('resposta_chamada', { aceito: true })
       }, 300)
 
       setChamadaRecebida(null)
-
     } catch (err) {
       alert('Erro ao aceitar chamada.')
       recusarChamada()
@@ -783,27 +828,21 @@ export default function Mensagens() {
     if (!localStreamRef.current || emChamada?.tipo !== 'video') return
     const novoModo = modoCamera === 'user' ? 'environment' : 'user'
     setModoCamera(novoModo)
-
     try {
-      localStreamRef.current.getVideoTracks().forEach(track => track.stop())
-
+      localStreamRef.current.getVideoTracks().forEach((track) => track.stop())
       const streamNovo = await navigator.mediaDevices.getUserMedia({
         audio: false,
         video: { facingMode: novoModo }
       })
-
       const videoTrackNovo = streamNovo.getVideoTracks()[0]
       const audioTrack = localStreamRef.current.getAudioTracks()[0]
-
       const streamCombinado = new MediaStream([videoTrackNovo, audioTrack])
       localStreamRef.current = streamCombinado
-
       if (videoLocalRef.current) {
         videoLocalRef.current.srcObject = streamCombinado
       }
-
       if (peerConnectionRef.current) {
-        const sender = peerConnectionRef.current.getSenders().find(s => s.track?.kind === 'video')
+        const sender = peerConnectionRef.current.getSenders().find((s) => s.track?.kind === 'video')
         if (sender) sender.replaceTrack(videoTrackNovo)
       }
     } catch (err) {}
@@ -814,47 +853,40 @@ export default function Mensagens() {
       const audioTrack = localStreamRef.current.getAudioTracks()[0]
       if (audioTrack) {
         audioTrack.enabled = !audioTrack.enabled
-        setEmChamada((prev) => prev ? { ...prev, microfoneMutado: !audioTrack.enabled } : null)
+        setEmChamada((prev) => (prev ? { ...prev, microfoneMutado: !audioTrack.enabled } : null))
       }
     }
   }
 
   async function encerrarChamadaLocal() {
     pararSom()
-
     if (timerChamadaRef.current) {
       clearInterval(timerChamadaRef.current)
       timerChamadaRef.current = null
     }
     setTempoChamada(0)
-
     if (peerConnectionRef.current) {
       peerConnectionRef.current.ontrack = null
       peerConnectionRef.current.onicecandidate = null
       peerConnectionRef.current.close()
       peerConnectionRef.current = null
     }
-
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach((track) => track.stop())
       localStreamRef.current = null
     }
-
     if (remoteStreamRef.current) {
       remoteStreamRef.current.getTracks().forEach((track) => track.stop())
       remoteStreamRef.current = null
     }
-
     if (videoLocalRef.current) videoLocalRef.current.srcObject = null
     if (videoRemotoRef.current) videoRemotoRef.current.srcObject = null
     if (audioRemotoRef.current) audioRemotoRef.current.srcObject = null
-
     if (canalSalaRef.current) {
       const tempCanal = canalSalaRef.current
       canalSalaRef.current = null
       await supabase.removeChannel(tempCanal)
     }
-
     setEmChamada(null)
     setChamadaRecebida(null)
   }
@@ -881,7 +913,6 @@ export default function Mensagens() {
   return (
     <main style={page}>
       <audio ref={audioRemotoRef} autoPlay playsInline style={{ display: 'none' }} />
-
       <style>{`
         @keyframes balancarChama {
           0% { transform: rotate(0deg) scale(1); }
@@ -909,15 +940,14 @@ export default function Mensagens() {
           <h1 style={titulo}>Papo BR</h1>
           <p style={subtitulo}>Meu ID: <strong style={{ color: '#FFD700' }}>@{usuarioAtual?.username || usuarioAtual?.nome}</strong></p>
         </div>
-
-        <button 
+        <button
           onClick={() => {
             setModalAdicionarIDAberto(true)
             setSugestoesPerfis([])
           }}
           style={{ background: '#FFD700', color: '#000', border: 'none', padding: '6px 12px', borderRadius: 20, fontSize: 12, fontWeight: 'bold', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4 }}
         >
-          🔑 Adicionar ID
+          Adicionar ID
         </button>
       </header>
 
@@ -926,18 +956,16 @@ export default function Mensagens() {
           <aside style={listaConversas}>
             <div style={containerAbasSuperiores}>
               <button onClick={() => setAbaAtiva('batepapo')} style={abaAtiva === 'batepapo' ? btnAbaAtiva : btnAbaInativa}>
-                <span>💬 Contatos Autorizados</span>
+                <span>Contatos Autorizados</span>
               </button>
             </div>
-
             {conversasBatePapo.length === 0 && (
               <div style={{ textAlign: 'center', padding: '40px 20px', color: '#65676b' }}>
-                <span style={{ fontSize: 32, display: 'block', marginBottom: 10 }}>🔑</span>
+                <span style={{ fontSize: 32, display: 'block', marginBottom: 10 }}>🔒</span>
                 <p style={{ margin: 0, fontWeight: 'bold' }}>Nenhum contato com ID liberado.</p>
-                <p style={{ fontSize: 12, marginTop: 4 }}>Clique em "🔑 Adicionar ID" acima para autorizar amigos para chamadas.</p>
+                <p style={{ fontSize: 12, marginTop: 4 }}>Clique em "Adicionar ID" acima para autorizar amigos para chamadas.</p>
               </div>
             )}
-
             {conversasBatePapo.map((conversa) => {
               const outro = conversa.outroUsuario
               return (
@@ -947,6 +975,7 @@ export default function Mensagens() {
                     onClick={() => {
                       setConversaAberta(conversa)
                       setTelaConversaAberta(true)
+                      carregarMensagens(conversa.id)
                     }}
                   >
                     <div style={avatarConversa}>
@@ -981,7 +1010,6 @@ export default function Mensagens() {
               >
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#e9edef" strokeWidth="2.5"><line x1="19" y1="12" x2="5" y2="12" /><polyline points="12 19 5 12 12 5" /></svg>
               </button>
-
               <div style={avatarTopoConversa}>
                 {conversaAberta.outroUsuario?.foto_url ? (
                   <img src={conversaAberta.outroUsuario.foto_url} alt="" style={fotoAvatar} />
@@ -989,13 +1017,12 @@ export default function Mensagens() {
                   conversaAberta.outroUsuario?.nome?.charAt(0)?.toUpperCase() ?? 'B'
                 )}
               </div>
-
               <div style={{ flex: 1, overflow: 'hidden' }}>
                 <strong style={{ color: '#e9edef', fontSize: 15, display: 'block' }}>
                   @{conversaAberta.outroUsuario?.username || conversaAberta.outroUsuario?.nome}
                 </strong>
                 <p style={{ color: '#00a884', fontSize: 11, margin: 0, fontWeight: 'bold' }}>
-                  🔑 Conexão Privada Ativa
+                  Conexão Privada Ativa
                 </p>
               </div>
 
@@ -1009,7 +1036,6 @@ export default function Mensagens() {
                 >
                   <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#e9edef" strokeWidth="2"><path d="M23 7l-7 5 7 5V7z" /><rect x="1" y="5" width="15" height="14" rx="3" ry="3" /></svg>
                 </button>
-
                 <button
                   type="button"
                   onClick={() => iniciarChamada('audio')}
@@ -1060,7 +1086,6 @@ export default function Mensagens() {
             <p style={{ fontSize: 13, color: '#65676b', marginBottom: 16 }}>
               Digite o <strong>@username</strong> ou o <strong>ID do Perfil</strong> do seu amigo para autorizar ligações de vídeo e áudio sem precisar de número de telefone:
             </p>
-
             <div style={{ position: 'relative' }}>
               <input
                 type="text"
@@ -1069,7 +1094,6 @@ export default function Mensagens() {
                 onChange={(e) => setIdParaAdicionar(e.target.value)}
                 style={inputModalID}
               />
-
               {sugestoesPerfis.length > 0 && (
                 <div style={caixaFlutuanteSugestoes}>
                   {sugestoesPerfis.map((perfil) => (
@@ -1094,14 +1118,13 @@ export default function Mensagens() {
                         </small>
                       </div>
                       <span style={{ fontSize: 11, background: '#e6f4ea', color: '#008C3A', padding: '2px 8px', borderRadius: 10, fontWeight: 'bold' }}>
-                        Autorizar 🔑
+                        Autorizar
                       </span>
                     </div>
                   ))}
                 </div>
               )}
             </div>
-
             <div style={{ display: 'flex', gap: 10, marginTop: 16 }}>
               <button onClick={() => setModalAdicionarIDAberto(false)} style={{ flex: 1, padding: 12, borderRadius: 10, border: 'none', background: '#e4e6eb', fontWeight: 'bold', cursor: 'pointer' }}>
                 Cancelar
@@ -1121,7 +1144,6 @@ export default function Mensagens() {
             <span style={{ fontSize: 13, color: '#00a884', fontWeight: 'bold', textTransform: 'uppercase' }}>
               Recebendo Chamada de {chamadaRecebida.tipo === 'video' ? 'Vídeo' : 'Áudio'}
             </span>
-
             <div style={avatarChamadaBox} className="iconeBalancando">
               {chamadaRecebida.remetente.foto_url ? (
                 <img src={chamadaRecebida.remetente.foto_url} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
@@ -1131,18 +1153,16 @@ export default function Mensagens() {
                 </span>
               )}
             </div>
-
             <h2 style={{ fontSize: 24, margin: '10px 0 4px 0', fontWeight: 'bold' }}>
               @{chamadaRecebida.remetente.username || chamadaRecebida.remetente.nome}
             </h2>
             <p style={{ fontSize: 14, color: '#FFD700', margin: 0, fontWeight: 'bold' }}>
-              ID Autorizado chamando você...
+              ID Autorizado chamando você
             </p>
           </div>
-
           <div style={{ display: 'flex', gap: 30, zIndex: 2 }}>
-            <button onClick={recusarChamada} style={{ width: 64, height: 64, borderRadius: '50%', backgroundColor: '#ef4444', border: 'none', color: '#fff', fontSize: 24, cursor: 'pointer' }}>✕</button>
-            <button onClick={aceitarChamada} style={{ width: 64, height: 64, borderRadius: '50%', backgroundColor: '#22c55e', border: 'none', color: '#fff', fontSize: 24, cursor: 'pointer' }}>✓</button>
+            <button onClick={recusarChamada} style={{ width: 64, height: 64, borderRadius: '50%', backgroundColor: '#ef4444', border: 'none', color: '#fff', fontSize: 24, cursor: 'pointer' }}>📞</button>
+            <button onClick={aceitarChamada} style={{ width: 64, height: 64, borderRadius: '50%', backgroundColor: '#22c55e', border: 'none', color: '#fff', fontSize: 24, cursor: 'pointer' }}>📞</button>
           </div>
         </div>
       )}
@@ -1152,42 +1172,41 @@ export default function Mensagens() {
         <div style={modalChamadaOverlay}>
           {emChamada.tipo === 'video' && (
             <>
-              <video 
-                ref={videoRemotoRef} 
-                autoPlay 
-                playsInline 
-                style={{ 
-                  position: 'absolute', 
-                  top: 0, 
-                  left: 0, 
-                  width: '100vw', 
-                  height: '100vh', 
-                  zIndex: 1, 
-                  objectFit: 'cover', 
+              <video
+                ref={videoRemotoRef}
+                autoPlay
+                playsInline
+                style={{
+                  position: 'absolute',
+                  top: 0,
+                  left: 0,
+                  width: '100vw',
+                  height: '100vh',
+                  zIndex: 1,
+                  objectFit: 'cover',
                   backgroundColor: '#000',
                   pointerEvents: 'none'
-                }} 
+                }}
               />
-
-              <video 
-                ref={videoLocalRef} 
-                autoPlay 
-                playsInline 
-                muted 
-                onClick={() => setInverterTelas(!inverterTelas)} 
-                style={{ 
-                  position: 'absolute', 
-                  top: 24, 
-                  right: 20, 
-                  width: 110, 
-                  height: 160, 
-                  borderRadius: 16, 
-                  objectFit: 'cover', 
-                  border: '2px solid #00a884', 
-                  zIndex: 10, 
-                  cursor: 'pointer', 
-                  display: emChamada.videoAtivo ? 'block' : 'none' 
-                }} 
+              <video
+                ref={videoLocalRef}
+                autoPlay
+                playsInline
+                muted
+                onClick={() => setInverterTelas(!inverterTelas)}
+                style={{
+                  position: 'absolute',
+                  top: 24,
+                  right: 20,
+                  width: 110,
+                  height: 160,
+                  borderRadius: 16,
+                  objectFit: 'cover',
+                  border: '2px solid #00a884',
+                  zIndex: 10,
+                  cursor: 'pointer',
+                  display: emChamada.videoAtivo ? 'block' : 'none'
+                }}
               />
             </>
           )}
@@ -1196,7 +1215,6 @@ export default function Mensagens() {
             <span style={{ fontSize: 13, color: '#00a884', fontWeight: 'bold', textTransform: 'uppercase', textShadow: '0 2px 4px rgba(0,0,0,0.8)' }}>
               {emChamada.tipo === 'video' ? 'Chamada de Vídeo' : 'Chamada de Áudio'}
             </span>
-
             {(emChamada.tipo === 'audio' || emChamada.status === 'chamando') && (
               <>
                 <div style={avatarChamadaBox} className={emChamada.status === 'chamando' ? 'iconeBalancando' : ''}>
@@ -1208,13 +1226,11 @@ export default function Mensagens() {
                     </span>
                   )}
                 </div>
-
                 <h2 style={{ fontSize: 22, margin: '10px 0 4px 0', fontWeight: 'bold', textShadow: '0 2px 8px rgba(0,0,0,0.8)' }}>
                   @{conversaAberta?.outroUsuario?.username || conversaAberta?.outroUsuario?.nome}
                 </h2>
               </>
             )}
-
             <p style={{ fontSize: 14, color: emChamada.status === 'chamando' ? '#FFD700' : '#8696a0', margin: 0, fontWeight: emChamada.status === 'chamando' ? 'bold' : 'normal', textShadow: '0 2px 8px rgba(0,0,0,0.8)' }}>
               {emChamada.status === 'chamando' ? 'Chamando via ID Privado...' : formatarTempo(tempoChamada)}
             </p>
@@ -1224,13 +1240,11 @@ export default function Mensagens() {
             <button onClick={alternarMicrofone} style={{ width: 52, height: 52, borderRadius: '50%', backgroundColor: emChamada.microfoneMutado ? '#ef4444' : '#2a3942', border: '1.5px solid #374151', cursor: 'pointer' }}>
               <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" /><path d="M19 10v2a7 7 0 0 1-14 0v-2" /><line x1="12" y1="19" x2="12" y2="23" /></svg>
             </button>
-
             {emChamada.tipo === 'video' && (
               <button onClick={inverterCamera} style={{ width: 52, height: 52, borderRadius: '50%', backgroundColor: '#2a3942', border: '1.5px solid #374151', cursor: 'pointer' }}>
                 <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2"><path d="M20 10c0-4.4-3.6-8-8-8s-8 3.6-8 8h3l-4 4-4-4h3c0-5.5 4.5-10 10-10s10 4.5 10 10h-2z" /><path d="M4 14c0 4.4 3.6 8 8 8s8-3.6 8-8h-3l4-4 4 4h-3c0 5.5-4.5 10-10 10s-10-4.5-10-10h2z" /></svg>
               </button>
             )}
-
             <button onClick={encerrarChamada} style={{ width: 62, height: 62, borderRadius: '50%', backgroundColor: '#ff4d4d', border: '2.5px solid #000', cursor: 'pointer' }}>
               <svg width="24" height="22" viewBox="0 0 24 24" fill="#000" stroke="#000" strokeWidth="1"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z" transform="rotate(135 12 12)" /></svg>
             </button>
@@ -1258,7 +1272,6 @@ const conversaItem = { width: '100%', border: '1px solid #eee', background: '#ff
 const avatarConversa = { width: 44, height: 44, borderRadius: '50%', background: '#008C3A', color: '#FFD700', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 900, flexShrink: 0 }
 const fotoAvatar = { width: '100%', height: '100%', objectFit: 'cover' as const }
 const dadosConversa = { display: 'flex', flexDirection: 'column' as const, gap: 2, overflow: 'hidden' }
-
 const janelaConversa = { background: '#0b141a', height: '100vh', width: '100%', position: 'fixed' as const, top: 0, left: 0, zIndex: 100000, display: 'flex', flexDirection: 'column' as const }
 const topoConversa = { padding: '10px 16px', background: '#111b21', display: 'flex', alignItems: 'center', gap: 12, borderBottom: '1px solid #222d34' }
 const avatarTopoConversa = { width: 40, height: 40, borderRadius: '50%', background: '#008C3A', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold' as const, overflow: 'hidden', flexShrink: 0 }
@@ -1271,49 +1284,12 @@ const outraMensagem = { maxWidth: '75%', background: '#202c33', color: '#fff', b
 const caixaEnviar = { padding: '12px', display: 'flex', gap: 10, background: '#111b21', alignItems: 'center' }
 const inputMensagem = { flex: 1, border: 'none', background: '#222d34', color: '#fff', padding: '12px 16px', borderRadius: 24, outline: 'none', fontSize: 14 }
 const botaoEnviarNovo = { width: 42, height: 42, borderRadius: '50%', background: '#00a884', color: '#fff', border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }
-
 const modalOverlayID = { position: 'fixed' as const, top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.6)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 150000, padding: 20 }
 const caixaModalID = { background: '#fff', padding: 20, borderRadius: 20, width: '100%', maxWidth: 420, boxShadow: '0 10px 30px rgba(0,0,0,0.3)' }
 const inputModalID = { width: '100%', padding: '12px 16px', borderRadius: 12, border: '1px solid #ccc', fontSize: 14, outline: 'none', boxSizing: 'border-box' as const }
-
-const caixaFlutuanteSugestoes = {
-  position: 'absolute' as const,
-  top: '100%',
-  left: 0,
-  right: 0,
-  background: '#fff',
-  borderRadius: 14,
-  boxShadow: '0 10px 28px rgba(0,0,0,0.3)',
-  border: '1px solid #e4e6eb',
-  marginTop: 6,
-  zIndex: 1000,
-  overflow: 'hidden' as const,
-  maxHeight: 230
-}
-
-const itemSugestao = {
-  display: 'flex',
-  alignItems: 'center',
-  gap: 10,
-  padding: '10px 14px',
-  cursor: 'pointer',
-  borderBottom: '1px solid #f0f2f5',
-  transition: 'background 0.2s'
-}
-
-const avatarSugestao = {
-  width: 36,
-  height: 36,
-  borderRadius: '50%',
-  background: '#008C3A',
-  color: '#FFD700',
-  display: 'flex',
-  alignItems: 'center',
-  justifyContent: 'center',
-  fontWeight: 'bold' as const,
-  flexShrink: 0
-}
-
+const caixaFlutuanteSugestoes = { position: 'absolute' as const, top: '100%', left: 0, right: 0, background: '#fff', borderRadius: 14, boxShadow: '0 10px 28px rgba(0,0,0,0.3)', border: '1px solid #e4e6eb', marginTop: 6, zIndex: 1000, overflow: 'hidden' as const, maxHeight: 230 }
+const itemSugestao = { display: 'flex', alignItems: 'center', gap: 10, padding: '10px 14px', cursor: 'pointer', borderBottom: '1px solid #f0f2f5' }
+const avatarSugestao = { width: 36, height: 36, borderRadius: '50%', background: '#008C3A', color: '#FFD700', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold' as const, flexShrink: 0 }
 const modalChamadaOverlay = { position: 'fixed' as const, top: 0, left: 0, width: '100vw', height: '100vh', background: '#111b21', zIndex: 200000, display: 'flex', flexDirection: 'column' as const, justifyContent: 'space-between', alignItems: 'center', padding: '50px 20px' }
 const avatarChamadaBox = { width: 110, height: 110, borderRadius: '50%', background: '#008C3A', margin: '20px auto', overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 0 30px rgba(0, 168, 132, 0.4)' }
 const controlesChamadaBar = { display: 'flex', alignItems: 'center', gap: 20, zIndex: 20 }
