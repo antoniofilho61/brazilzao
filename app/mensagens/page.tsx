@@ -171,7 +171,6 @@ export default function Mensagens() {
     }
   }, [])
 
-  // REGISTRAR PUSH FCM NO BANCO
   async function registrarPushNotifications(meuId: string) {
     if (!Capacitor.isNativePlatform()) return
     try {
@@ -181,6 +180,17 @@ export default function Mensagens() {
         permStatus = await PushNotifications.requestPermissions()
       }
       if (permStatus.receive === 'granted') {
+        // CRIA O CANAL DE CHAMADAS DE ALTA PRIORIDADE NO ANDROID
+        await PushNotifications.createChannel({
+          id: 'chamadas_channel',
+          name: 'Chamadas de Voz e Vídeo',
+          description: 'Notificações de chamadas do Papo BR',
+          importance: 5, // 5 = MÁXIMA PRIORIDADE (Acorda a tela)
+          sound: 'ringtone', // Som de toque de chamada telefônica do Android
+          vibration: true,
+          visibility: 1
+        })
+
         await PushNotifications.register()
       }
       PushNotifications.addListener('registration', async (token) => {

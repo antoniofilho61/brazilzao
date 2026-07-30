@@ -54,10 +54,12 @@ export async function POST(req: Request) {
       android: {
         priority: 'high' as const,
         notification: {
-          sound: 'default',
+          sound: 'ringtone', // Mudado de 'default' para 'ringtone'
           priority: 'max' as const,
           channelId: 'chamadas_channel',
-          visibility: 'public' as const
+          visibility: 'public' as const,
+          defaultSound: false,
+          defaultVibrateTimings: true
         }
       }
     }
