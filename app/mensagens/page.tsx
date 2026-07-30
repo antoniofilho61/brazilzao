@@ -689,6 +689,34 @@ const [contatoOnline, setContatoOnline] = useState(false)
     }
   }
 
+async function removerContatoAutorizado(contatoId: string, nomeContato: string) {
+    if (!usuarioAtual) return
+    
+    const confirmar = window.confirm(`Deseja remover @${nomeContato} dos seus contatos autorizados?`)
+    if (!confirmar) return
+
+    try {
+      const { error } = await supabase
+        .from('contatos_autorizados')
+        .delete()
+        .eq('usuario_id', usuarioAtual.id)
+        .eq('contato_id', contatoId)
+
+      if (!error) {
+        alert('Contato removido com sucesso!')
+        if (conversaAberta?.outroUsuario?.id === contatoId) {
+          setTelaConversaAberta(false)
+          setConversaAberta(null)
+        }
+        await carregarConversas(usuarioAtual.id)
+      } else {
+        alert('Erro ao remover contato.')
+      }
+    } catch (e) {
+      alert('Erro inesperado ao remover.')
+    }
+  }
+
   async function abrirOuCriarConversa(meuId: string, outroUsuarioId: string) {
     const { data: conv1 } = await supabase.from('conversas').select('*').eq('usuario_1', meuId).eq('usuario_2', outroUsuarioId).maybeSingle()
     let conversaExistente = conv1
@@ -722,6 +750,32 @@ const [contatoOnline, setContatoOnline] = useState(false)
       await supabase.from('mensagens').update({ lida: true }).eq('conversa_id', conversaId).eq('destinatario_id', usuarioAtual.id).eq('lida', false)
     }
   }
+
+// ESCUTA MENSAGENS EM TEMPO REAL NA CONVERSA ABERTA
+  useEffect(() => {
+    if (!conversaAberta?.id) return
+
+    const canalMensagens = supabase
+      .channel(`mensagens-realtime-${conversaAberta.id}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*', // Escuta INSERT, UPDATE e DELETE
+          schema: 'public',
+          table: 'mensagens',
+          filter: `conversa_id=eq.${conversaAberta.id}`
+        },
+        () => {
+          // Sempre que houver nova mensagem, alteração ou exclusão, atualiza a lista!
+          carregarMensagens(conversaAberta.id)
+        }
+      )
+      .subscribe()
+
+    return () => {
+      supabase.removeChannel(canalMensagens)
+    }
+  }, [conversaAberta?.id])
 
 async function reagirMensagem(mensagemId: string, emoji: string) {
     setMensagemReacaoId(null) // Fecha o menu flutuante
@@ -1345,9 +1399,9 @@ async function reagirMensagem(mensagemId: string, emoji: string) {
             {conversasBatePapo.map((conversa) => {
               const outro = conversa.outroUsuario
               return (
-                <div key={conversa.id} style={conversaItemBox}>
+                <div key={conversa.id} style={{ ...conversaItemBox, display: 'flex', alignItems: 'center', gap: 6 }}>
                   <button
-                    style={conversaItem}
+                    style={{ ...conversaItem, flex: 1 }}
                     onClick={() => {
                       setConversaAberta(conversa)
                       setTelaConversaAberta(true)
@@ -1363,8 +1417,34 @@ async function reagirMensagem(mensagemId: string, emoji: string) {
                     </div>
                     <div style={dadosConversa}>
                       <strong style={{ color: '#008C3A' }}>@{outro?.username || outro?.nome}</strong>
-                      <small style={{ color: '#16a34a', fontWeight: 'bold' }}>🟢 ID Autorizado para Chamadas</small>
+                      <small style={{ color: '#16a34a', fontWeight: 'bold' }}> ID Autorizado para Chamadas</small>
                     </div>
+                  </button>
+
+                  {/* BOTÃO REMOVER CONTATO */}
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (outro) removerContatoAutorizado(outro.id, outro.username || outro.nome || '');
+                    }}
+                    style={{
+                      background: '#ffebee',
+                      border: '1px solid #ffcdd2',
+                      borderRadius: 12,
+                      width: 40,
+                      height: 48,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      cursor: 'pointer',
+                      flexShrink: 0
+                    }}
+                    title="Remover Autorização"
+                  >
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#d32f2f" strokeWidth="2">
+                      <polyline points="3 6 5 6 21 6" />
+                      <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                    </svg>
                   </button>
                 </div>
               )
